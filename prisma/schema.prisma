@@ -1,0 +1,41 @@
+// PaperLens database schema
+// Postgres on Railway. Run `prisma migrate deploy` on start (see package.json).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  // Ollama API key, AES-256-GCM encrypted at rest. Null until set in Settings.
+  ollamaKeyEnc String?
+  // Per-user Ollama preferences.
+  ollamaModel  String   @default("gpt-oss:120b-cloud")
+  ollamaHost   String   @default("https://ollama.com")
+  papers       Paper[]
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model Paper {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  fileName  String
+  // Raw PDF bytes (stored as Postgres bytea). Capped by MAX_PDF_MB on upload.
+  data      Bytes
+  size      Int
+  pages     Int      @default(0)
+  level     String?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
