@@ -28,7 +28,7 @@ export function levelById(id) {
 
 // Builds {system, user, max} for a given analysis tab. `fullText` is the
 // extracted paper text supplied by the client.
-export function buildPrompt(which, levelId, fullText, fileName = "the paper") {
+export function buildPrompt(which, levelId, fullText, fileName = "the paper", opts = {}) {
   const lvl = levelById(levelId);
   switch (which) {
     case "overview":
@@ -43,14 +43,19 @@ export function buildPrompt(which, levelId, fullText, fileName = "the paper") {
         user: `Break this paper into its logical sections (e.g. Introduction, Related Work, Method, Experiments, Results, Conclusion) and explain each in turn. Paper text follows:\n\n${fullText.slice(0, 13000)}`,
         max: 1800,
       };
-    case "diagram":
+    case "diagram": {
+      const req = (opts.request || "").trim();
+      const target = req
+        ? `Produce a Mermaid diagram of the following, grounded in this paper: "${req}".`
+        : "Produce a Mermaid flowchart of the core method/architecture/pipeline of this paper.";
       return {
         system:
           lvl.sys +
-          " You output ONE mermaid diagram inside a ```mermaid fenced block that captures the paper's method or architecture or pipeline. Use 'flowchart TD'. Keep node labels short and quoted. After the diagram, add 3 to 5 sentences explaining the flow. Do not output any other code fences.",
-        user: `Produce a Mermaid flowchart of the core method/architecture/pipeline of this paper, then explain it. Paper text follows:\n\n${fullText.slice(0, 11000)}`,
-        max: 1200,
+          " You output ONE mermaid diagram inside a ```mermaid fenced block. Prefer 'flowchart TD' unless another diagram type clearly fits the request better. Keep node labels short and quoted. After the diagram, add 3 to 5 sentences explaining it. Do not output any other code fences.",
+        user: `${target} Then explain it. Paper text follows:\n\n${fullText.slice(0, 11000)}`,
+        max: 1300,
       };
+    }
     case "glossary":
       return {
         system: lvl.sys + " Output markdown. Format each entry as **Term** then a one or two sentence definition grounded in how the paper uses it.",

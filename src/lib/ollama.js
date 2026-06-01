@@ -37,3 +37,22 @@ export async function ollamaChat({ host, apiKey, model, system, user, maxTokens 
 
   return res?.message?.content ?? "";
 }
+
+// Multi-turn chat: caller supplies the full messages array (system + history).
+export async function ollamaChatMessages({ host, apiKey, model, messages, maxTokens = 1200 }) {
+  if (!apiKey) throw new Error("Missing Ollama API key.");
+
+  const client = new Ollama({
+    host: host || DEFAULT_HOST,
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+
+  const res = await client.chat({
+    model,
+    messages,
+    stream: false,
+    options: { temperature: 0.4, num_predict: maxTokens },
+  });
+
+  return res?.message?.content ?? "";
+}

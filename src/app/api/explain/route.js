@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
 import { decrypt } from "@/lib/crypto";
-import { ollamaChat, CLOUD_MODELS } from "@/lib/ollama";
+import { ollamaChat } from "@/lib/ollama";
 import { buildPrompt } from "@/lib/prompts";
 
 export const runtime = "nodejs";
@@ -30,16 +30,14 @@ export async function POST(req) {
 
   let prompt;
   try {
-    prompt = buildPrompt(which, level, text, fileName);
+    prompt = buildPrompt(which, level, text, fileName, { request: body.request });
   } catch (e) {
     return NextResponse.json({ error: String(e.message || e) }, { status: 400 });
   }
 
-  // Allow the client to request a specific model, else fall back to the saved one.
+  // The client may type any model name; fall back to the saved default if blank.
   const model =
-    typeof body.model === "string" && CLOUD_MODELS.some((m) => m.id === body.model)
-      ? body.model
-      : user.ollamaModel;
+    typeof body.model === "string" && body.model.trim() ? body.model.trim() : user.ollamaModel;
 
   let apiKey;
   try {

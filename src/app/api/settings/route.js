@@ -36,11 +36,9 @@ export async function PUT(req) {
     }
   }
 
-  if (typeof body.model === "string") {
-    if (!CLOUD_MODELS.some((m) => m.id === body.model)) {
-      return NextResponse.json({ error: "Unknown model." }, { status: 400 });
-    }
-    data.ollamaModel = body.model;
+  if (typeof body.model === "string" && body.model.trim()) {
+    // Free-text: accept any model name the user types.
+    data.ollamaModel = body.model.trim().slice(0, 120);
   }
 
   if (typeof body.host === "string" && body.host.trim()) {

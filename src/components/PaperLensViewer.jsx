@@ -6,21 +6,32 @@ import { getPdfJs, getMermaid } from "@/lib/pdfClient";
 import { LEVELS } from "@/lib/prompts";
 
 // ---------------------------------------------------------------------------
-// Server-side Ollama call. The API key lives encrypted in the DB and is
-// decrypted only inside /api/explain — it never reaches this component.
+// Server calls. The API key lives encrypted in the DB and is decrypted only
+// inside /api/explain and /api/chat — it never reaches this component.
 // ---------------------------------------------------------------------------
-async function callExplain({ which, level, text, fileName, model }) {
+async function callExplain({ which, level, text, fileName, model, request }) {
   const res = await fetch("/api/explain", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ which, level, text, fileName, model }),
+    body: JSON.stringify({ which, level, text, fileName, model, request }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
   return data.content || "";
 }
 
-// ---- Mermaid block renderer ----
+async function callChat({ messages, context, level, model }) {
+  const res = await fetch("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages, context, level, model }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+  return data.content || "";
+}
+
+// ---- Mermaid renderer ----
 function MermaidBlock({ code }) {
   const ref = useRef(null);
   const [err, setErr] = useState(null);
@@ -38,10 +49,8 @@ function MermaidBlock({ code }) {
     })();
     return () => { alive = false; };
   }, [code]);
-  if (err) {
-    return <div style={{ ...S.codePre, color: "#f0a0a0" }}>Diagram failed to render:\n{err}\n\n{code}</div>;
-  }
-  return <div ref={ref} style={S.mermaidWrap} />;
+  if (err) return <pre className="code-pre">Diagram failed to render:{"\n"}{err}{"\n\n"}{code}</pre>;
+  return <div ref={ref} className="mermaid-wrap" />;
 }
 
 function renderRichText(text) {
@@ -60,17 +69,17 @@ function renderRichText(text) {
 function Prose({ text }) {
   const lines = text.split("\n");
   return (
-    <div>
+    <>
       {lines.map((ln, i) => {
-        if (!ln.trim()) return <div key={i} style={{ height: 8 }} />;
-        if (ln.startsWith("### ")) return <h4 key={i} style={S.h4}>{inline(ln.slice(4))}</h4>;
-        if (ln.startsWith("## ")) return <h3 key={i} style={S.h3}>{inline(ln.slice(3))}</h3>;
-        if (ln.startsWith("# ")) return <h2 key={i} style={S.h2}>{inline(ln.slice(2))}</h2>;
+        if (!ln.trim()) return <div key={i} style={{ height: 6 }} />;
+        if (ln.startsWith("### ")) return <h4 key={i}>{inline(ln.slice(4))}</h4>;
+        if (ln.startsWith("## ")) return <h3 key={i}>{inline(ln.slice(3))}</h3>;
+        if (ln.startsWith("# ")) return <h2 key={i}>{inline(ln.slice(2))}</h2>;
         if (/^\s*[-*]\s+/.test(ln))
-          return <div key={i} style={S.bullet}><span style={S.bulletDot}>▸</span><span>{inline(ln.replace(/^\s*[-*]\s+/, ""))}</span></div>;
-        return <p key={i} style={S.p}>{inline(ln)}</p>;
+          return <div key={i} className="bullet"><span className="dot">▸</span><span>{inline(ln.replace(/^\s*[-*]\s+/, ""))}</span></div>;
+        return <p key={i}>{inline(ln)}</p>;
       })}
-    </div>
+    </>
   );
 }
 
@@ -80,13 +89,21 @@ function inline(s) {
   let last = 0, m, k = 0;
   while ((m = re.exec(s)) !== null) {
     if (m.index > last) out.push(s.slice(last, m.index));
-    if (m[2] !== undefined) out.push(<strong key={k++} style={{ color: "#e8e4d8" }}>{m[2]}</strong>);
-    else out.push(<code key={k++} style={S.inlineCode}>{m[3]}</code>);
+    if (m[2] !== undefined) out.push(<strong key={k++}>{m[2]}</strong>);
+    else out.push(<code key={k++} className="icode">{m[3]}</code>);
     last = re.lastIndex;
   }
   if (last < s.length) out.push(s.slice(last));
   return out;
 }
+
+const TABS = [
+  ["overview", "Overview"],
+  ["sections", "Sections"],
+  ["diagram", "Diagram"],
+  ["glossary", "Glossary"],
+  ["chat", "Chat"],
+];
 
 // ===========================================================================
 export default function PaperLensViewer({ paperId, title, fileName, initialLevel }) {
@@ -105,17 +122,27 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
 
   const [tab, setTab] = useState("overview");
   const [out, setOut] = useState({ overview: "", sections: "", diagram: "", glossary: "" });
-  const [busy, setBusy] = useState("");
+  const [loading, setLoading] = useState({});
   const [error, setError] = useState("");
+
+  const [diagramRequest, setDiagramRequest] = useState("");
 
   const [highlights, setHighlights] = useState([]);
   const [explainPopup, setExplainPopup] = useState(null);
 
+  const [messages, setMessages] = useState([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatBusy, setChatBusy] = useState(false);
+
   const canvasRef = useRef(null);
   const textLayerRef = useRef(null);
   const renderTaskRef = useRef(null);
+  const autoRanRef = useRef(false);
+  const chatScrollRef = useRef(null);
 
-  // ---- Fetch settings (model + whether a key exists) ----
+  const modelLabel = models.find((m) => m.id === model)?.label || model;
+
+  // ---- Settings (model + whether a key exists) ----
   useEffect(() => {
     (async () => {
       try {
@@ -126,13 +153,11 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
           setModels(data.models);
           setHasKey(data.hasKey);
         }
-      } catch {
-        /* non-fatal */
-      }
+      } catch {/* non-fatal */}
     })();
   }, []);
 
-  // ---- Load the stored PDF + extract text ----
+  // ---- Load stored PDF + extract text ----
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -161,11 +186,12 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
     return () => { alive = false; };
   }, [paperId]);
 
-  // ---- Render current page with a selectable text layer ----
+  // ---- Render current page + a proper selectable text layer (pdf.js) ----
   useEffect(() => {
     if (!pdfDoc) return;
     let cancelled = false;
     (async () => {
+      const pdfjsLib = await getPdfJs();
       const page = await pdfDoc.getPage(pageNum);
       const viewport = page.getViewport({ scale: 1.4 });
       const canvas = canvasRef.current;
@@ -174,41 +200,48 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
       canvas.width = viewport.width;
       canvas.height = viewport.height;
 
-      if (renderTaskRef.current) {
-        try { renderTaskRef.current.cancel(); } catch {}
-      }
+      if (renderTaskRef.current) { try { renderTaskRef.current.cancel(); } catch {} }
       const task = page.render({ canvasContext: ctx, viewport });
       renderTaskRef.current = task;
       try { await task.promise; } catch { return; }
       if (cancelled) return;
 
-      const tc = await page.getTextContent();
+      // Build the selectable text layer using pdf.js's own renderer so the
+      // invisible text lines up exactly with the rendered page at this scale.
       const layer = textLayerRef.current;
       if (!layer) return;
       layer.innerHTML = "";
+      layer.style.setProperty("--scale-factor", String(viewport.scale));
       layer.style.width = viewport.width + "px";
       layer.style.height = viewport.height + "px";
-      tc.items.forEach((it) => {
-        const span = document.createElement("span");
-        span.textContent = it.str;
-        const tx = it.transform;
-        const fontH = Math.hypot(tx[2], tx[3]);
-        span.style.position = "absolute";
-        span.style.left = tx[4] + "px";
-        span.style.top = (viewport.height - tx[5] - fontH) + "px";
-        span.style.fontSize = fontH + "px";
-        span.style.lineHeight = "1";
-        span.style.color = "transparent";
-        span.style.whiteSpace = "pre";
-        span.style.cursor = "text";
-        layer.appendChild(span);
-      });
+      const textContent = await page.getTextContent();
+      if (cancelled) return;
+      try {
+        await pdfjsLib.renderTextLayer({ textContentSource: textContent, container: layer, viewport, textDivs: [] }).promise;
+      } catch {/* ignore */}
     })();
     return () => { cancelled = true; };
   }, [pdfDoc, pageNum]);
 
-  // ---- Persist level when chosen ----
-  const chooseLevel = async (id) => {
+  // ---- Auto-generate overview / sections / glossary once per open ----
+  useEffect(() => {
+    if (autoRanRef.current) return;
+    if (!fullText || !level || !hasKey) return;
+    autoRanRef.current = true;
+    (async () => {
+      for (const which of ["overview", "sections", "glossary"]) {
+        await generate(which);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fullText, level, hasKey]);
+
+  // ---- Auto-scroll chat ----
+  useEffect(() => {
+    chatScrollRef.current?.scrollTo({ top: chatScrollRef.current.scrollHeight, behavior: "smooth" });
+  }, [messages, chatBusy]);
+
+  const chooseLevel = (id) => {
     setLevel(id);
     setShowLevelGate(false);
     fetch(`/api/papers/${paperId}`, {
@@ -218,7 +251,22 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
     }).catch(() => {});
   };
 
-  // ---- Selection -> highlight + explain ----
+  const generate = async (which, opts = {}) => {
+    if (!level) { setShowLevelGate(true); return; }
+    if (!fullText) { setError("The paper text is still loading."); return; }
+    if (!hasKey) { setError("No Ollama API key set. Add one in Settings."); return; }
+    setError("");
+    setLoading((l) => ({ ...l, [which]: true }));
+    try {
+      const body = await callExplain({ which, level, text: fullText, fileName, model, request: opts.request });
+      setOut((o) => ({ ...o, [which]: body }));
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setLoading((l) => ({ ...l, [which]: false }));
+    }
+  };
+
   const onMouseUpPage = useCallback(() => {
     const sel = window.getSelection();
     const txt = sel ? sel.toString().trim() : "";
@@ -240,128 +288,188 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
     }
   };
 
-  const generate = async (which) => {
+  const sendChat = async () => {
+    const text = chatInput.trim();
+    if (!text || chatBusy) return;
     if (!level) { setShowLevelGate(true); return; }
-    if (!fullText) { setError("The paper text is still loading."); return; }
     if (!hasKey) { setError("No Ollama API key set. Add one in Settings."); return; }
-    setError("");
-    setBusy(which);
+    const next = [...messages, { role: "user", content: text }];
+    setMessages(next);
+    setChatInput("");
+    setChatBusy(true);
     try {
-      const body = await callExplain({ which, level, text: fullText, fileName, model });
-      setOut((o) => ({ ...o, [which]: body }));
-      setTab(which);
+      const content = await callChat({ messages: next, context: fullText, level, model });
+      setMessages((m) => [...m, { role: "assistant", content }]);
     } catch (e) {
-      setError(e.message || String(e));
+      setMessages((m) => [...m, { role: "assistant", content: "Error: " + (e.message || e) }]);
     } finally {
-      setBusy("");
+      setChatBusy(false);
     }
   };
 
-  const modelLabel = models.find((m) => m.id === model)?.label || model;
+  const analysisPanel = (which) => (
+    <>
+      <div className="gen-bar">
+        <button className="btn-sm" disabled={loading[which] || !pdfDoc || !hasKey} onClick={() => generate(which)}>
+          {loading[which] ? "Generating…" : out[which] ? "Regenerate" : "Generate"}
+        </button>
+        {loading[which] && <span className="loading-line"><span className="spinner" /> Querying {modelLabel}…</span>}
+      </div>
+      {out[which] ? (
+        <div className="prose">{renderRichText(out[which])}</div>
+      ) : (
+        !loading[which] && <div className="placeholder">{pdfDoc ? `The ${which} will appear here.` : "Loading…"}</div>
+      )}
+    </>
+  );
 
   return (
-    <div style={S.root}>
-      {/* Header */}
-      <header style={S.header}>
-        <div style={S.brand}>
-          <Link href="/dashboard" style={{ ...S.backLink }}>‹ dashboard</Link>
-          <span style={S.brandMark}>◧</span>
-          <span style={S.brandName}>{title}</span>
+    <div className="viewer">
+      {/* Top bar */}
+      <div className="viewer-top">
+        <div className="left">
+          <Link href="/dashboard" className="back-link">‹ Dashboard</Link>
+          <span className="brand-mark">◧</span>
+          <span className="paper-title" title={title}>{title}</span>
         </div>
-        <div style={S.headerControls}>
-          {!hasKey && <Link href="/settings" style={S.warnLink}>set API key →</Link>}
-          <select style={S.select} value={model} onChange={(e) => setModel(e.target.value)}>
+        <div className="right">
+          {!hasKey && <Link href="/settings" className="warn-link">Set API key →</Link>}
+          <input
+            className="input model-input"
+            list="vmodels"
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            placeholder="model name"
+            spellCheck={false}
+            title="Ollama model — type any name or pick from the list"
+          />
+          <datalist id="vmodels">
             {models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
-          </select>
+          </datalist>
         </div>
-      </header>
+      </div>
 
-      {error && <div style={S.errorBar}>{error}</div>}
+      {error && <div className="error" style={{ margin: 0, borderRadius: 0 }}>{error}</div>}
 
-      <div style={S.main}>
-        {/* Left: PDF viewer */}
-        <section style={S.left}>
+      <div className="viewer-body">
+        {/* Left: PDF */}
+        <div className="pdf-pane">
           {loadingPdf ? (
-            <div style={S.empty}><div style={{ ...S.loading, margin: "auto" }}>Loading PDF…</div></div>
+            <div className="empty-state"><span className="spinner" /> Loading PDF…</div>
           ) : !pdfDoc ? (
-            <div style={S.empty}><div style={S.emptyTitle}>Could not load this PDF.</div></div>
+            <div className="empty-state"><div className="big">Could not load this PDF.</div></div>
           ) : (
             <>
-              <div style={S.pdfToolbar}>
-                <button style={S.navBtn} disabled={pageNum <= 1} onClick={() => setPageNum((n) => Math.max(1, n - 1))}>‹</button>
-                <span style={S.pageInfo}>{pageNum} / {numPages}</span>
-                <button style={S.navBtn} disabled={pageNum >= numPages} onClick={() => setPageNum((n) => Math.min(numPages, n + 1))}>›</button>
+              <div className="pdf-toolbar">
+                <button className="iconbtn" disabled={pageNum <= 1} onClick={() => setPageNum((n) => Math.max(1, n - 1))}>‹</button>
+                <span className="page-info">{pageNum} / {numPages}</span>
+                <button className="iconbtn" disabled={pageNum >= numPages} onClick={() => setPageNum((n) => Math.min(numPages, n + 1))}>›</button>
                 <div style={{ flex: 1 }} />
-                <button style={S.explainBtn} onClick={explainSelection}>✦ Explain selection</button>
+                <button className="btn-sm" onClick={explainSelection}>✦ Explain selection</button>
               </div>
-              <div style={S.pdfScroll}>
-                <div style={S.pdfStage} onMouseUp={onMouseUpPage}>
-                  <canvas ref={canvasRef} style={S.canvas} />
-                  <div ref={textLayerRef} style={S.textLayer} />
+              <div className="pdf-scroll">
+                <div className="pdf-stage" onMouseUp={onMouseUpPage}>
+                  <canvas ref={canvasRef} className="pdf-canvas" />
+                  <div ref={textLayerRef} className="textLayer" />
                 </div>
               </div>
               {highlights.length > 0 && (
-                <div style={S.highlightTray}>
-                  <div style={S.trayTitle}>Highlights ({highlights.length})</div>
+                <div className="highlight-tray">
+                  <div className="tray-title">Highlights ({highlights.length})</div>
                   {highlights.slice(-6).reverse().map((h, i) => (
-                    <div key={i} style={S.highlightItem}>
-                      <span style={S.hlPage}>p{h.page}</span>
-                      <span style={S.hlText}>{h.text.slice(0, 120)}{h.text.length > 120 ? "…" : ""}</span>
+                    <div key={i} className="tray-item">
+                      <span className="pg">p{h.page}</span>
+                      <span className="tx">{h.text.slice(0, 120)}{h.text.length > 120 ? "…" : ""}</span>
                     </div>
                   ))}
                 </div>
               )}
             </>
           )}
-        </section>
+        </div>
 
-        {/* Right: explanation panel */}
-        <section style={S.right}>
-          <div style={S.levelStrip}>
-            <span style={S.levelLabel}>Level:</span>
+        {/* Right: panel */}
+        <div className="panel-pane">
+          <div className="level-row">
+            <span className="level-label">Level</span>
             {level
-              ? <span style={S.levelActive}>{LEVELS.find((l) => l.id === level)?.label}</span>
-              : <span style={S.levelNone}>not set</span>}
-            <button style={S.levelChange} onClick={() => setShowLevelGate(true)}>change</button>
+              ? <span className="pill">{LEVELS.find((l) => l.id === level)?.label}</span>
+              : <span className="pill none">not set</span>}
+            <button className="link-btn" onClick={() => setShowLevelGate(true)}>change</button>
           </div>
 
-          <div style={S.tabs}>
-            {[["overview", "Overview"], ["sections", "Sections"], ["diagram", "Diagram"], ["glossary", "Glossary"]].map(([id, lbl]) => (
-              <button key={id} style={{ ...S.tab, ...(tab === id ? S.tabActive : {}) }} onClick={() => setTab(id)}>{lbl}</button>
+          <div className="tabbar">
+            {TABS.map(([id, lbl]) => (
+              <button key={id} className={`tab ${tab === id ? "active" : ""}`} onClick={() => setTab(id)}>{lbl}</button>
             ))}
           </div>
 
-          <div style={S.genRow}>
-            <button style={S.genBtn} disabled={!!busy || !pdfDoc} onClick={() => generate(tab)}>
-              {busy === tab ? "Generating…" : (out[tab] ? "Regenerate" : "Generate")}
-            </button>
-          </div>
-
-          <div style={S.outputScroll}>
-            {busy === tab && <div style={S.loading}>Querying {modelLabel}…</div>}
-            {!out[tab] && busy !== tab && (
-              <div style={S.placeholder}>
-                {pdfDoc ? `Hit Generate to produce the ${tab} for "${fileName}".` : "Loading…"}
+          {tab === "chat" ? (
+            <div className="chat-wrap">
+              <div className="chat-scroll" ref={chatScrollRef}>
+                {messages.length === 0 && !chatBusy && (
+                  <div className="chat-empty">Ask anything about “{title}” — the model answers grounded in the paper text.</div>
+                )}
+                {messages.map((m, i) => (
+                  <div key={i} className={`msg ${m.role}`}>
+                    {m.role === "assistant" ? <div className="prose">{renderRichText(m.content)}</div> : m.content}
+                  </div>
+                ))}
+                {chatBusy && <div className="msg assistant"><span className="spinner" /> Thinking…</div>}
               </div>
-            )}
-            {out[tab] && <div style={S.output}>{renderRichText(out[tab])}</div>}
-          </div>
-        </section>
+              <div className="chat-input-row">
+                <input
+                  className="input"
+                  placeholder={hasKey ? "Ask about the paper…" : "Set an API key in Settings first"}
+                  value={chatInput}
+                  disabled={!hasKey}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } }}
+                />
+                <button className="btn" onClick={sendChat} disabled={chatBusy || !chatInput.trim()}>Send</button>
+              </div>
+            </div>
+          ) : (
+            <div className="panel-scroll">
+              {tab === "diagram" ? (
+                <>
+                  <div className="diagram-form">
+                    <input
+                      className="input"
+                      placeholder="Describe the diagram you want (optional) — e.g. “the training loop”, “data flow”"
+                      value={diagramRequest}
+                      onChange={(e) => setDiagramRequest(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") generate("diagram", { request: diagramRequest }); }}
+                    />
+                    <button className="btn" style={{ width: "auto", padding: "0 18px" }}
+                            disabled={loading.diagram || !pdfDoc || !hasKey}
+                            onClick={() => generate("diagram", { request: diagramRequest })}>
+                      {loading.diagram ? "…" : out.diagram ? "Regenerate" : "Generate"}
+                    </button>
+                  </div>
+                  {loading.diagram && <div className="loading-line"><span className="spinner" /> Drawing with {modelLabel}…</div>}
+                  {out.diagram ? <div className="prose">{renderRichText(out.diagram)}</div>
+                    : !loading.diagram && <div className="placeholder">Describe a diagram above (or leave blank for the core method) and hit Generate.</div>}
+                </>
+              ) : (
+                analysisPanel(tab)
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* Level gate modal */}
+      {/* Level gate */}
       {showLevelGate && (
-        <div style={S.modalWrap} onClick={() => level && setShowLevelGate(false)}>
-          <div style={S.modal} onClick={(e) => e.stopPropagation()}>
-            <div style={S.modalTitle}>How deep should I go?</div>
-            <div style={S.modalSub}>
-              Pick the comprehension level. Every explanation, diagram, and glossary entry is tuned to it. You can change it any time.
-            </div>
-            <div style={S.levelGrid}>
+        <div className="modal-overlay" onClick={() => level && setShowLevelGate(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h2 className="modal-title">How deep should I go?</h2>
+            <p className="modal-sub">Pick the comprehension level. Every explanation, diagram, glossary entry, and chat reply is tuned to it. You can change it any time.</p>
+            <div className="level-grid">
               {LEVELS.map((l) => (
-                <button key={l.id} style={{ ...S.levelCard, ...(level === l.id ? S.levelCardActive : {}) }} onClick={() => chooseLevel(l.id)}>
-                  <div style={S.levelCardTitle}>{l.label}</div>
-                  <div style={S.levelCardBlurb}>{l.blurb}</div>
+                <button key={l.id} className={`level-card ${level === l.id ? "active" : ""}`} onClick={() => chooseLevel(l.id)}>
+                  <div className="level-card-title">{l.label}</div>
+                  <div className="level-card-blurb">{l.blurb}</div>
                 </button>
               ))}
             </div>
@@ -371,15 +479,15 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
 
       {/* Explain-selection popup */}
       {explainPopup && (
-        <div style={S.modalWrap} onClick={() => setExplainPopup(null)}>
-          <div style={S.popup} onClick={(e) => e.stopPropagation()}>
-            <div style={S.popupHead}>
-              <span style={S.popupTag}>✦ selection</span>
-              <button style={S.popupClose} onClick={() => setExplainPopup(null)}>×</button>
+        <div className="modal-overlay" onClick={() => setExplainPopup(null)}>
+          <div className="modal popup" onClick={(e) => e.stopPropagation()}>
+            <div className="popup-head">
+              <span className="popup-tag">✦ Selection</span>
+              <button className="popup-close" onClick={() => setExplainPopup(null)}>×</button>
             </div>
-            <div style={S.popupQuote}>"{explainPopup.text.slice(0, 280)}{explainPopup.text.length > 280 ? "…" : ""}"</div>
-            <div style={S.popupBody}>
-              {explainPopup.loading ? <span style={S.loading}>Thinking…</span> : <Prose text={explainPopup.body} />}
+            <div className="popup-quote">“{explainPopup.text.slice(0, 280)}{explainPopup.text.length > 280 ? "…" : ""}”</div>
+            <div className="prose">
+              {explainPopup.loading ? <span className="loading-line"><span className="spinner" /> Thinking…</span> : <Prose text={explainPopup.body} />}
             </div>
           </div>
         </div>
@@ -387,98 +495,3 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
     </div>
   );
 }
-
-// ===========================================================================
-// Styles (terminal / cyberpunk, dark, monospace accents)
-// ===========================================================================
-const FONT_MONO = "'JetBrains Mono', 'SF Mono', ui-monospace, monospace";
-const FONT_BODY = "'IBM Plex Sans', system-ui, sans-serif";
-const ACCENT = "#7ef9c0";
-const ACCENT2 = "#ff7e9d";
-const BG = "#0c0e0d";
-const PANEL = "#121615";
-const LINE = "#26302c";
-const TEXT = "#d6d2c4";
-const MUTE = "#7d8a83";
-
-const S = {
-  root: { fontFamily: FONT_BODY, background: BG, color: TEXT, height: "100vh", display: "flex", flexDirection: "column" },
-  header: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 20px", borderBottom: `1px solid ${LINE}`, background: "linear-gradient(180deg,#0e1210,#0c0e0d)" },
-  brand: { display: "flex", alignItems: "center", gap: 12, minWidth: 0 },
-  backLink: { fontFamily: FONT_MONO, fontSize: 12, color: MUTE },
-  brandMark: { color: ACCENT, fontSize: 20 },
-  brandName: { fontFamily: FONT_MONO, fontWeight: 700, fontSize: 15, color: "#eef0ea", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 420 },
-  headerControls: { display: "flex", gap: 12, alignItems: "center" },
-  warnLink: { fontFamily: FONT_MONO, fontSize: 12, color: ACCENT2 },
-  select: { fontFamily: FONT_MONO, fontSize: 12, background: PANEL, color: TEXT, border: `1px solid ${LINE}`, borderRadius: 6, padding: "7px 10px" },
-
-  errorBar: { fontFamily: FONT_MONO, fontSize: 12, color: "#ffb3b3", background: "#2a1414", borderBottom: "1px solid #4a1f1f", padding: "8px 20px" },
-
-  main: { display: "flex", flex: 1, minHeight: 0 },
-  left: { flex: 1.1, borderRight: `1px solid ${LINE}`, display: "flex", flexDirection: "column", minWidth: 0 },
-  right: { flex: 1, display: "flex", flexDirection: "column", minWidth: 0 },
-
-  empty: { margin: "auto", textAlign: "center", maxWidth: 380, padding: 30, display: "flex" },
-  emptyTitle: { fontFamily: FONT_MONO, fontSize: 18, color: "#eef0ea", letterSpacing: 1 },
-
-  pdfToolbar: { display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", borderBottom: `1px solid ${LINE}`, background: PANEL },
-  navBtn: { fontFamily: FONT_MONO, fontSize: 18, lineHeight: 1, width: 32, height: 32, background: BG, color: TEXT, border: `1px solid ${LINE}`, borderRadius: 6, cursor: "pointer" },
-  pageInfo: { fontFamily: FONT_MONO, fontSize: 12, color: MUTE },
-  explainBtn: { fontFamily: FONT_MONO, fontSize: 12, fontWeight: 600, background: "transparent", color: ACCENT2, border: `1px solid ${ACCENT2}`, borderRadius: 6, padding: "7px 12px", cursor: "pointer" },
-
-  pdfScroll: { flex: 1, overflow: "auto", padding: 18, background: "#08100c" },
-  pdfStage: { position: "relative", margin: "0 auto", width: "fit-content", boxShadow: "0 0 0 1px #1d2622, 0 18px 50px rgba(0,0,0,.6)" },
-  canvas: { display: "block", borderRadius: 2 },
-  textLayer: { position: "absolute", top: 0, left: 0, overflow: "hidden", lineHeight: 1 },
-
-  highlightTray: { borderTop: `1px solid ${LINE}`, background: PANEL, padding: "10px 14px", maxHeight: 140, overflow: "auto" },
-  trayTitle: { fontFamily: FONT_MONO, fontSize: 11, color: ACCENT, letterSpacing: 1, marginBottom: 6 },
-  highlightItem: { display: "flex", gap: 8, alignItems: "baseline", padding: "4px 0", borderBottom: `1px dashed ${LINE}` },
-  hlPage: { fontFamily: FONT_MONO, fontSize: 10, color: ACCENT2, flexShrink: 0 },
-  hlText: { fontSize: 12, color: MUTE },
-
-  levelStrip: { display: "flex", alignItems: "center", gap: 8, padding: "10px 16px", borderBottom: `1px solid ${LINE}`, background: PANEL },
-  levelLabel: { fontFamily: FONT_MONO, fontSize: 11, color: MUTE, letterSpacing: 1 },
-  levelActive: { fontFamily: FONT_MONO, fontSize: 12, color: "#06120c", background: ACCENT, padding: "3px 10px", borderRadius: 20, fontWeight: 700 },
-  levelNone: { fontFamily: FONT_MONO, fontSize: 12, color: ACCENT2 },
-  levelChange: { marginLeft: "auto", fontFamily: FONT_MONO, fontSize: 11, background: "transparent", color: MUTE, border: `1px solid ${LINE}`, borderRadius: 6, padding: "4px 10px", cursor: "pointer" },
-
-  tabs: { display: "flex", borderBottom: `1px solid ${LINE}` },
-  tab: { flex: 1, fontFamily: FONT_MONO, fontSize: 12, letterSpacing: 1, background: "transparent", color: MUTE, border: "none", borderBottom: "2px solid transparent", padding: "12px 0", cursor: "pointer" },
-  tabActive: { color: ACCENT, borderBottom: `2px solid ${ACCENT}` },
-
-  genRow: { padding: "12px 16px", borderBottom: `1px solid ${LINE}` },
-  genBtn: { fontFamily: FONT_MONO, fontSize: 12, fontWeight: 600, letterSpacing: 1, width: "100%", background: ACCENT, color: "#06120c", border: "none", borderRadius: 6, padding: "11px 0", cursor: "pointer" },
-
-  outputScroll: { flex: 1, overflow: "auto", padding: "18px 22px" },
-  loading: { fontFamily: FONT_MONO, fontSize: 13, color: ACCENT, animation: "pulse 1.4s infinite" },
-  placeholder: { fontFamily: FONT_MONO, fontSize: 13, color: MUTE, lineHeight: 1.6 },
-  output: { fontSize: 14.5, lineHeight: 1.62 },
-
-  h2: { fontFamily: FONT_MONO, fontSize: 18, color: "#eef0ea", margin: "18px 0 8px", letterSpacing: .5 },
-  h3: { fontFamily: FONT_MONO, fontSize: 15.5, color: ACCENT, margin: "16px 0 6px" },
-  h4: { fontFamily: FONT_MONO, fontSize: 13.5, color: ACCENT2, margin: "12px 0 4px" },
-  p: { margin: "6px 0", color: TEXT },
-  bullet: { display: "flex", gap: 8, margin: "4px 0", color: TEXT },
-  bulletDot: { color: ACCENT, flexShrink: 0 },
-  inlineCode: { fontFamily: FONT_MONO, fontSize: 12.5, background: "#0a1310", color: ACCENT, padding: "1px 5px", borderRadius: 4, border: `1px solid ${LINE}` },
-  codePre: { fontFamily: FONT_MONO, fontSize: 12, whiteSpace: "pre-wrap", background: "#0a1310", padding: 12, borderRadius: 6, border: `1px solid ${LINE}` },
-  mermaidWrap: { background: "#0a1310", border: `1px solid ${LINE}`, borderRadius: 8, padding: 14, margin: "12px 0", overflow: "auto", textAlign: "center" },
-
-  modalWrap: { position: "fixed", inset: 0, background: "rgba(4,8,6,.78)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, backdropFilter: "blur(3px)" },
-  modal: { background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 26, maxWidth: 640, width: "92%", boxShadow: "0 30px 80px rgba(0,0,0,.6)" },
-  modalTitle: { fontFamily: FONT_MONO, fontSize: 20, color: "#eef0ea", letterSpacing: .5 },
-  modalSub: { fontSize: 14, color: MUTE, marginTop: 8, lineHeight: 1.6 },
-  levelGrid: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginTop: 20 },
-  levelCard: { textAlign: "left", background: BG, border: `1px solid ${LINE}`, borderRadius: 10, padding: 16, cursor: "pointer", transition: "all .15s" },
-  levelCardActive: { borderColor: ACCENT, boxShadow: `0 0 0 1px ${ACCENT}` },
-  levelCardTitle: { fontFamily: FONT_MONO, fontSize: 14, color: ACCENT, fontWeight: 700 },
-  levelCardBlurb: { fontSize: 12.5, color: MUTE, marginTop: 8, lineHeight: 1.5 },
-
-  popup: { background: PANEL, border: `1px solid ${ACCENT2}`, borderRadius: 12, padding: 20, maxWidth: 560, width: "92%", maxHeight: "76vh", overflow: "auto" },
-  popupHead: { display: "flex", justifyContent: "space-between", alignItems: "center" },
-  popupTag: { fontFamily: FONT_MONO, fontSize: 11, color: ACCENT2, letterSpacing: 2 },
-  popupClose: { background: "transparent", border: "none", color: MUTE, fontSize: 22, cursor: "pointer", lineHeight: 1 },
-  popupQuote: { fontFamily: FONT_MONO, fontSize: 12.5, color: MUTE, fontStyle: "italic", borderLeft: `2px solid ${ACCENT2}`, paddingLeft: 12, margin: "12px 0" },
-  popupBody: { fontSize: 14, lineHeight: 1.6 },
-};

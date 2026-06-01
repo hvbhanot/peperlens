@@ -124,11 +124,22 @@ export default function SettingsClient() {
 
         <div className="field">
           <label>DEFAULT MODEL</label>
-          <select className="input" value={model} onChange={(e) => setModel(e.target.value)}>
+          <input
+            className="input mono"
+            list="model-suggestions"
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            placeholder="e.g. gpt-oss:120b-cloud"
+            spellCheck={false}
+          />
+          <datalist id="model-suggestions">
             {models.map((m) => (
               <option key={m.id} value={m.id}>{m.label}</option>
             ))}
-          </select>
+          </datalist>
+          <p className="muted" style={{ marginTop: 6, fontSize: 12 }}>
+            Type any Ollama model name, or pick a Cloud model from the list.
+          </p>
         </div>
 
         <div className="field">
