@@ -393,8 +393,9 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
                       h.rects.map((r, i) => (
                         <div key={h.id + "-" + i} className="hl-rect"
                           style={{ left: r.left * scale, top: r.top * scale, width: r.width * scale, height: r.height * scale }}
-                          title="Click to explain this highlight"
-                          onClick={(e) => { e.stopPropagation(); explainText(h.text); }} />
+                          title="Click to explain · right-click to remove"
+                          onClick={(e) => { e.stopPropagation(); explainText(h.text); }}
+                          onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); removeHighlight(h.id); }} />
                       ))
                     )}
                   </div>
@@ -402,7 +403,10 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
               </div>
               {highlights.length > 0 && (
                 <div className="highlight-tray">
-                  <div className="tray-title">Highlights ({highlights.length})</div>
+                  <div className="tray-title">
+                    Highlights ({highlights.length})
+                    <button className="link-btn" style={{ margin: 0, float: "right" }} onClick={() => setHighlights([])}>Clear all</button>
+                  </div>
                   {highlights.slice(-6).reverse().map((h) => (
                     <div key={h.id} className="tray-item">
                       <span className="pg">p{h.page}</span>

@@ -29,42 +29,80 @@ function MermaidBlock({ code }) {
   );
 }
 
-// Inline markdown: **bold** and `code`. (Math is handled by KaTeX afterward.)
+// Inline markdown: **bold** / __bold__, *italic*, `code`. Math stays untouched
+// (KaTeX renders it afterward).
 function inline(s) {
   const out = [];
-  const re = /(\*\*([^*]+)\*\*|`([^`]+)`)/g;
+  const re = /(\*\*([^*]+?)\*\*|__([^_]+?)__|\*([^*\n]+?)\*|`([^`]+?)`)/g;
   let last = 0, m, k = 0;
   while ((m = re.exec(s)) !== null) {
     if (m.index > last) out.push(s.slice(last, m.index));
-    if (m[2] !== undefined) out.push(<strong key={k++}>{m[2]}</strong>);
-    else out.push(<code key={k++} className="icode">{m[3]}</code>);
+    if (m[2] != null) out.push(<strong key={k++}>{m[2]}</strong>);
+    else if (m[3] != null) out.push(<strong key={k++}>{m[3]}</strong>);
+    else if (m[4] != null) out.push(<em key={k++}>{m[4]}</em>);
+    else out.push(<code key={k++} className="icode">{m[5]}</code>);
     last = re.lastIndex;
   }
   if (last < s.length) out.push(s.slice(last));
   return out;
 }
 
-// Basic markdown → elements (headings, bullets, paragraphs). No mermaid/math.
+function splitRow(line) {
+  let s = line.trim();
+  if (s.startsWith("|")) s = s.slice(1);
+  if (s.endsWith("|")) s = s.slice(0, -1);
+  return s.split("|").map((c) => c.trim());
+}
+
+// A GFM table separator row, e.g. |----|:---:|
+const isTableSep = (l) => {
+  const t = l.trim();
+  return t.includes("|") && t.includes("-") && /^[\s:|-]+$/.test(t);
+};
+
+// Block-level markdown → elements (headings, tables, lists, rules, paragraphs).
+// No mermaid/math here.
 export function Prose({ text }) {
   const lines = text.split("\n");
-  return (
-    <>
-      {lines.map((ln, i) => {
-        if (!ln.trim()) return <div key={i} style={{ height: 6 }} />;
-        if (ln.startsWith("### ")) return <h4 key={i}>{inline(ln.slice(4))}</h4>;
-        if (ln.startsWith("## ")) return <h3 key={i}>{inline(ln.slice(3))}</h3>;
-        if (ln.startsWith("# ")) return <h2 key={i}>{inline(ln.slice(2))}</h2>;
-        if (/^\s*[-*]\s+/.test(ln))
-          return (
-            <div key={i} className="bullet">
-              <span className="dot">▸</span>
-              <span>{inline(ln.replace(/^\s*[-*]\s+/, ""))}</span>
-            </div>
-          );
-        return <p key={i}>{inline(ln)}</p>;
-      })}
-    </>
-  );
+  const els = [];
+  let i = 0, key = 0;
+
+  while (i < lines.length) {
+    const ln = lines[i];
+
+    // Table: a row with pipes immediately followed by a separator row.
+    if (ln.includes("|") && i + 1 < lines.length && isTableSep(lines[i + 1])) {
+      const header = splitRow(ln);
+      const rows = [];
+      i += 2;
+      while (i < lines.length && lines[i].includes("|") && lines[i].trim() !== "") {
+        rows.push(splitRow(lines[i]));
+        i++;
+      }
+      els.push(
+        <table key={key++} className="md-table">
+          <thead><tr>{header.map((c, j) => <th key={j}>{inline(c)}</th>)}</tr></thead>
+          <tbody>{rows.map((r, ri) => <tr key={ri}>{header.map((_, ci) => <td key={ci}>{inline(r[ci] || "")}</td>)}</tr>)}</tbody>
+        </table>
+      );
+      continue;
+    }
+
+    if (!ln.trim()) { els.push(<div key={key++} style={{ height: 6 }} />); i++; continue; }
+    if (/^(-{3,}|\*{3,}|_{3,})\s*$/.test(ln.trim())) { els.push(<hr key={key++} className="md-hr" />); i++; continue; }
+    if (ln.startsWith("### ")) { els.push(<h4 key={key++}>{inline(ln.slice(4))}</h4>); i++; continue; }
+    if (ln.startsWith("## ")) { els.push(<h3 key={key++}>{inline(ln.slice(3))}</h3>); i++; continue; }
+    if (ln.startsWith("# ")) { els.push(<h2 key={key++}>{inline(ln.slice(2))}</h2>); i++; continue; }
+
+    const om = ln.match(/^\s*(\d+)\.\s+(.*)/);
+    if (om) { els.push(<div key={key++} className="bullet"><span className="dot num">{om[1]}.</span><span>{inline(om[2])}</span></div>); i++; continue; }
+    if (/^\s*[-*]\s+/.test(ln)) { els.push(<div key={key++} className="bullet"><span className="dot">▸</span><span>{inline(ln.replace(/^\s*[-*]\s+/, ""))}</span></div>); i++; continue; }
+
+    els.push(<p key={key++}>{inline(ln)}</p>);
+    i++;
+  }
+
+  return <>{els}</>;
 }
 
 function renderParts(text) {

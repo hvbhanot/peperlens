@@ -252,8 +252,15 @@ select.input { cursor: pointer; }
 .prose h4 { font-size: 14px; font-weight: 700; color: var(--primary); margin: 14px 0 4px; }
 .prose p { margin: 8px 0; }
 .prose strong { color: var(--text); font-weight: 600; }
+.prose em { font-style: italic; }
 .prose .bullet { display: flex; gap: 9px; margin: 5px 0; }
 .prose .dot { color: var(--primary); flex-shrink: 0; }
+.prose .dot.num { font-weight: 600; min-width: 18px; }
+.prose .md-hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+.prose .md-table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 13.5px; display: block; overflow-x: auto; }
+.prose .md-table th, .prose .md-table td { border: 1px solid var(--border); padding: 8px 11px; text-align: left; vertical-align: top; }
+.prose .md-table th { background: var(--surface-2); font-weight: 600; color: var(--text); white-space: nowrap; }
+.prose .md-table tr:nth-child(even) td { background: color-mix(in srgb, var(--surface-2) 45%, transparent); }
 .icode { font-family: var(--font-mono); font-size: 12.5px; background: var(--surface-2); color: #b4316a; padding: 1px 6px; border-radius: 5px; }
 .code-pre { font-family: var(--font-mono); font-size: 12px; white-space: pre-wrap; background: var(--surface-2); padding: 12px; border-radius: var(--r-sm); border: 1px solid var(--border); color: var(--danger); }
 .mermaid-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 16px; margin: 12px 0; overflow: auto; text-align: center; box-shadow: var(--shadow-sm); }
