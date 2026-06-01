@@ -38,6 +38,22 @@ export async function ollamaChat({ host, apiKey, model, system, user, maxTokens 
   return res?.message?.content ?? "";
 }
 
+// Streaming chat. Returns an async iterator of response parts; each part has
+// part.message.content. Caller pipes the deltas to an HTTP ReadableStream.
+export async function ollamaStream({ host, apiKey, model, messages, maxTokens = 1400 }) {
+  if (!apiKey) throw new Error("Missing Ollama API key.");
+  const client = new Ollama({
+    host: host || DEFAULT_HOST,
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+  return client.chat({
+    model,
+    messages,
+    stream: true,
+    options: { temperature: 0.3, num_predict: maxTokens },
+  });
+}
+
 // Multi-turn chat: caller supplies the full messages array (system + history).
 export async function ollamaChatMessages({ host, apiKey, model, messages, maxTokens = 1200 }) {
   if (!apiKey) throw new Error("Missing Ollama API key.");

@@ -25,8 +25,23 @@ export async function getPdfJs() {
 export async function getMermaid() {
   if (window.mermaid) return window.mermaid;
   await loadScript("https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js");
-  window.mermaid.initialize({ startOnLoad: false, theme: "dark", securityLevel: "loose" });
+  window.mermaid.initialize({ startOnLoad: false, theme: "neutral", securityLevel: "loose" });
   return window.mermaid;
+}
+
+// KaTeX + auto-render for LaTeX math in model output.
+export async function getKatex() {
+  if (window.renderMathInElement) return window.renderMathInElement;
+  if (!document.querySelector("link[data-katex]")) {
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css";
+    link.setAttribute("data-katex", "1");
+    document.head.appendChild(link);
+  }
+  await loadScript("https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js");
+  await loadScript("https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js");
+  return window.renderMathInElement;
 }
 
 // Extracts plain text (capped) and page count from a PDF ArrayBuffer.

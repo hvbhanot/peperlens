@@ -31,6 +31,12 @@ export function levelById(id) {
 export function buildPrompt(which, levelId, fullText, fileName = "the paper", opts = {}) {
   const lvl = levelById(levelId);
   switch (which) {
+    case "tldr":
+      return {
+        system: lvl.sys + " Output 3 to 5 markdown bullet points, each one sentence. No heading, no preamble.",
+        user: `Give the key takeaways (TL;DR) of this paper as a few tight bullets: what it does, why it matters, and the headline result. Paper text follows:\n\n${fullText.slice(0, 9000)}`,
+        max: 500,
+      };
     case "overview":
       return {
         system: lvl.sys + " Output well-structured markdown with ## headings.",

@@ -2,99 +2,39 @@
 
 import { useState, useRef, useEffect, useCallback } from "react";
 import Link from "next/link";
-import { getPdfJs, getMermaid } from "@/lib/pdfClient";
+import { getPdfJs } from "@/lib/pdfClient";
 import { LEVELS } from "@/lib/prompts";
+import { RichText, Prose } from "@/components/RichText";
+import ThemeToggle from "@/components/ThemeToggle";
 
-// ---------------------------------------------------------------------------
-// Server calls. The API key lives encrypted in the DB and is decrypted only
-// inside /api/explain and /api/chat — it never reaches this component.
-// ---------------------------------------------------------------------------
-async function callExplain({ which, level, text, fileName, model, request }) {
-  const res = await fetch("/api/explain", {
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+// Streamed POST: yields the growing text via onText, returns the full string.
+// Pre-stream failures arrive as JSON and are surfaced as thrown errors.
+async function streamPost(url, body, onText) {
+  const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ which, level, text, fileName, model, request }),
+    body: JSON.stringify(body),
   });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
-  return data.content || "";
-}
-
-async function callChat({ messages, context, level, model }) {
-  const res = await fetch("/api/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages, context, level, model }),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
-  return data.content || "";
-}
-
-// ---- Mermaid renderer ----
-function MermaidBlock({ code }) {
-  const ref = useRef(null);
-  const [err, setErr] = useState(null);
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        const mermaid = await getMermaid();
-        const id = "m" + Math.random().toString(36).slice(2);
-        const { svg } = await mermaid.render(id, code);
-        if (alive && ref.current) ref.current.innerHTML = svg;
-      } catch (e) {
-        if (alive) setErr(String(e.message || e));
-      }
-    })();
-    return () => { alive = false; };
-  }, [code]);
-  if (err) return <pre className="code-pre">Diagram failed to render:{"\n"}{err}{"\n\n"}{code}</pre>;
-  return <div ref={ref} className="mermaid-wrap" />;
-}
-
-function renderRichText(text) {
-  const parts = [];
-  const re = /```mermaid\s*([\s\S]*?)```/g;
-  let last = 0, m, key = 0;
-  while ((m = re.exec(text)) !== null) {
-    if (m.index > last) parts.push(<Prose key={key++} text={text.slice(last, m.index)} />);
-    parts.push(<MermaidBlock key={key++} code={m[1].trim()} />);
-    last = re.lastIndex;
+  if (!res.ok) {
+    let msg = `Request failed (${res.status})`;
+    if ((res.headers.get("content-type") || "").includes("json")) {
+      const d = await res.json().catch(() => ({}));
+      msg = d.error || msg;
+    }
+    throw new Error(msg);
   }
-  if (last < text.length) parts.push(<Prose key={key++} text={text.slice(last)} />);
-  return parts;
-}
-
-function Prose({ text }) {
-  const lines = text.split("\n");
-  return (
-    <>
-      {lines.map((ln, i) => {
-        if (!ln.trim()) return <div key={i} style={{ height: 6 }} />;
-        if (ln.startsWith("### ")) return <h4 key={i}>{inline(ln.slice(4))}</h4>;
-        if (ln.startsWith("## ")) return <h3 key={i}>{inline(ln.slice(3))}</h3>;
-        if (ln.startsWith("# ")) return <h2 key={i}>{inline(ln.slice(2))}</h2>;
-        if (/^\s*[-*]\s+/.test(ln))
-          return <div key={i} className="bullet"><span className="dot">▸</span><span>{inline(ln.replace(/^\s*[-*]\s+/, ""))}</span></div>;
-        return <p key={i}>{inline(ln)}</p>;
-      })}
-    </>
-  );
-}
-
-function inline(s) {
-  const out = [];
-  const re = /(\*\*([^*]+)\*\*|`([^`]+)`)/g;
-  let last = 0, m, k = 0;
-  while ((m = re.exec(s)) !== null) {
-    if (m.index > last) out.push(s.slice(last, m.index));
-    if (m[2] !== undefined) out.push(<strong key={k++}>{m[2]}</strong>);
-    else out.push(<code key={k++} className="icode">{m[3]}</code>);
-    last = re.lastIndex;
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let full = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    full += dec.decode(value, { stream: true });
+    onText(full);
   }
-  if (last < s.length) out.push(s.slice(last));
-  return out;
+  return full;
 }
 
 const TABS = [
@@ -105,7 +45,6 @@ const TABS = [
   ["chat", "Chat"],
 ];
 
-// ===========================================================================
 export default function PaperLensViewer({ paperId, title, fileName, initialLevel }) {
   const [model, setModel] = useState("");
   const [models, setModels] = useState([]);
@@ -114,6 +53,7 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
   const [pdfDoc, setPdfDoc] = useState(null);
   const [numPages, setNumPages] = useState(0);
   const [pageNum, setPageNum] = useState(1);
+  const [scale, setScale] = useState(1.4);
   const [fullText, setFullText] = useState("");
   const [loadingPdf, setLoadingPdf] = useState(true);
 
@@ -121,8 +61,10 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
   const [showLevelGate, setShowLevelGate] = useState(!initialLevel);
 
   const [tab, setTab] = useState("overview");
-  const [out, setOut] = useState({ overview: "", sections: "", diagram: "", glossary: "" });
+  const [out, setOut] = useState({ tldr: "", overview: "", sections: "", diagram: "", glossary: "" });
+  const [streamBuf, setStreamBuf] = useState({});
   const [loading, setLoading] = useState({});
+  const [copied, setCopied] = useState("");
   const [error, setError] = useState("");
 
   const [diagramRequest, setDiagramRequest] = useState("");
@@ -133,26 +75,27 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
   const [messages, setMessages] = useState([]);
   const [chatInput, setChatInput] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
+  const [chatStreaming, setChatStreaming] = useState("");
 
   const canvasRef = useRef(null);
   const textLayerRef = useRef(null);
+  const stageRef = useRef(null);
+  const pdfScrollRef = useRef(null);
   const renderTaskRef = useRef(null);
+  const baseWidthRef = useRef(0);
+  const fittedRef = useRef(false);
   const autoRanRef = useRef(false);
   const chatScrollRef = useRef(null);
 
   const modelLabel = models.find((m) => m.id === model)?.label || model;
 
-  // ---- Settings (model + whether a key exists) ----
+  // ---- Settings ----
   useEffect(() => {
     (async () => {
       try {
         const res = await fetch("/api/settings");
         const data = await res.json();
-        if (res.ok) {
-          setModel(data.model);
-          setModels(data.models);
-          setHasKey(data.hasKey);
-        }
+        if (res.ok) { setModel(data.model); setModels(data.models); setHasKey(data.hasKey); }
       } catch {/* non-fatal */}
     })();
   }, []);
@@ -166,6 +109,7 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
         const pdfjsLib = await getPdfJs();
         const doc = await pdfjsLib.getDocument({ url: `/api/papers/${paperId}/file`, withCredentials: true }).promise;
         if (!alive) return;
+        baseWidthRef.current = doc ? (await doc.getPage(1)).getViewport({ scale: 1 }).width : 0;
         setPdfDoc(doc);
         setNumPages(doc.numPages);
 
@@ -186,14 +130,14 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
     return () => { alive = false; };
   }, [paperId]);
 
-  // ---- Render current page + a proper selectable text layer (pdf.js) ----
+  // ---- Render current page + selectable text layer ----
   useEffect(() => {
     if (!pdfDoc) return;
     let cancelled = false;
     (async () => {
       const pdfjsLib = await getPdfJs();
       const page = await pdfDoc.getPage(pageNum);
-      const viewport = page.getViewport({ scale: 1.4 });
+      const viewport = page.getViewport({ scale });
       const canvas = canvasRef.current;
       if (!canvas) return;
       const ctx = canvas.getContext("2d");
@@ -206,12 +150,10 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
       try { await task.promise; } catch { return; }
       if (cancelled) return;
 
-      // Build the selectable text layer using pdf.js's own renderer so the
-      // invisible text lines up exactly with the rendered page at this scale.
       const layer = textLayerRef.current;
       if (!layer) return;
       layer.innerHTML = "";
-      layer.style.setProperty("--scale-factor", String(viewport.scale));
+      layer.style.setProperty("--scale-factor", String(scale));
       layer.style.width = viewport.width + "px";
       layer.style.height = viewport.height + "px";
       const textContent = await page.getTextContent();
@@ -221,34 +163,44 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
       } catch {/* ignore */}
     })();
     return () => { cancelled = true; };
-  }, [pdfDoc, pageNum]);
+  }, [pdfDoc, pageNum, scale]);
 
-  // ---- Auto-generate overview / sections / glossary once per open ----
+  // ---- Auto-generate TL;DR + overview/sections/glossary once per open ----
   useEffect(() => {
     if (autoRanRef.current) return;
     if (!fullText || !level || !hasKey) return;
     autoRanRef.current = true;
     (async () => {
-      for (const which of ["overview", "sections", "glossary"]) {
+      for (const which of ["tldr", "overview", "sections", "glossary"]) {
         await generate(which);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fullText, level, hasKey]);
 
-  // ---- Auto-scroll chat ----
   useEffect(() => {
     chatScrollRef.current?.scrollTo({ top: chatScrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages, chatBusy]);
+  }, [messages, chatStreaming, chatBusy]);
+
+  // Fit-to-width when the scroll container first mounts.
+  const attachScroll = useCallback((node) => {
+    pdfScrollRef.current = node;
+    if (node && baseWidthRef.current && !fittedRef.current) {
+      const avail = node.clientWidth - 44;
+      setScale(clamp(avail / baseWidthRef.current, 0.5, 2.2));
+      fittedRef.current = true;
+    }
+  }, []);
+
+  const fitWidth = () => {
+    const node = pdfScrollRef.current;
+    if (node && baseWidthRef.current) setScale(clamp((node.clientWidth - 44) / baseWidthRef.current, 0.5, 2.5));
+  };
 
   const chooseLevel = (id) => {
     setLevel(id);
     setShowLevelGate(false);
-    fetch(`/api/papers/${paperId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ level: id }),
-    }).catch(() => {});
+    fetch(`/api/papers/${paperId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ level: id }) }).catch(() => {});
   };
 
   const generate = async (which, opts = {}) => {
@@ -257,36 +209,69 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
     if (!hasKey) { setError("No Ollama API key set. Add one in Settings."); return; }
     setError("");
     setLoading((l) => ({ ...l, [which]: true }));
+    setStreamBuf((s) => ({ ...s, [which]: "" }));
     try {
-      const body = await callExplain({ which, level, text: fullText, fileName, model, request: opts.request });
-      setOut((o) => ({ ...o, [which]: body }));
+      const full = await streamPost(
+        "/api/explain",
+        { which, level, text: fullText, fileName, model, request: opts.request },
+        (t) => setStreamBuf((s) => ({ ...s, [which]: t }))
+      );
+      setOut((o) => ({ ...o, [which]: full }));
     } catch (e) {
       setError(e.message || String(e));
     } finally {
       setLoading((l) => ({ ...l, [which]: false }));
+      setStreamBuf((s) => ({ ...s, [which]: "" }));
     }
   };
 
-  const onMouseUpPage = useCallback(() => {
-    const sel = window.getSelection();
-    const txt = sel ? sel.toString().trim() : "";
-    if (txt.length < 3) return;
-    setHighlights((h) => [...h, { page: pageNum, text: txt }]);
-  }, [pageNum]);
-
-  const explainSelection = async () => {
-    const sel = window.getSelection();
-    const txt = sel ? sel.toString().trim() : "";
-    if (!txt) { setError("Select some text in the PDF first."); return; }
+  const explainText = async (txt) => {
+    if (!txt) return;
     if (!level) { setShowLevelGate(true); return; }
+    if (!hasKey) { setError("No Ollama API key set. Add one in Settings."); return; }
     setExplainPopup({ text: txt, body: "", loading: true });
     try {
-      const body = await callExplain({ which: "selection", level, text: txt, fileName, model });
-      setExplainPopup({ text: txt, body, loading: false });
+      const full = await streamPost(
+        "/api/explain",
+        { which: "selection", level, text: txt, fileName, model },
+        (t) => setExplainPopup((p) => (p ? { ...p, body: t } : p))
+      );
+      setExplainPopup({ text: txt, body: full, loading: false });
     } catch (e) {
       setExplainPopup({ text: txt, body: "Error: " + (e.message || e), loading: false });
     }
   };
+
+  const explainSelection = () => {
+    const sel = window.getSelection();
+    const txt = sel ? sel.toString().trim() : "";
+    if (!txt) { setError("Select some text in the PDF first."); return; }
+    explainText(txt);
+  };
+
+  // Capture a selection as a clickable highlight (rects normalized to scale 1).
+  const onMouseUpPage = useCallback(() => {
+    const sel = window.getSelection();
+    const txt = sel ? sel.toString().trim() : "";
+    if (txt.length < 3) return;
+    const stage = stageRef.current;
+    if (!stage) return;
+    const sRect = stage.getBoundingClientRect();
+    let rects = [];
+    try {
+      const range = sel.getRangeAt(0);
+      rects = Array.from(range.getClientRects())
+        .map((r) => ({ left: (r.left - sRect.left) / scale, top: (r.top - sRect.top) / scale, width: r.width / scale, height: r.height / scale }))
+        .filter((r) => r.width > 1 && r.height > 1);
+    } catch {/* ignore */}
+    if (!rects.length) return;
+    setHighlights((h) => {
+      if (h.length && h[h.length - 1].text === txt && h[h.length - 1].page === pageNum) return h;
+      return [...h, { id: Date.now() + Math.random().toString(36).slice(2, 6), page: pageNum, text: txt, rects }];
+    });
+  }, [pageNum, scale]);
+
+  const removeHighlight = (id) => setHighlights((h) => h.filter((x) => x.id !== id));
 
   const sendChat = async () => {
     const text = chatInput.trim();
@@ -297,14 +282,39 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
     setMessages(next);
     setChatInput("");
     setChatBusy(true);
+    setChatStreaming("");
     try {
-      const content = await callChat({ messages: next, context: fullText, level, model });
-      setMessages((m) => [...m, { role: "assistant", content }]);
+      const full = await streamPost("/api/chat", { messages: next, context: fullText, level, model }, (t) => setChatStreaming(t));
+      setMessages((m) => [...m, { role: "assistant", content: full }]);
     } catch (e) {
       setMessages((m) => [...m, { role: "assistant", content: "Error: " + (e.message || e) }]);
     } finally {
       setChatBusy(false);
+      setChatStreaming("");
     }
+  };
+
+  const copyOut = (which) => {
+    const t = out[which];
+    if (!t) return;
+    navigator.clipboard?.writeText(t);
+    setCopied(which);
+    setTimeout(() => setCopied((c) => (c === which ? "" : c)), 1500);
+  };
+
+  const exportAll = () => {
+    const order = [["tldr", "Key Takeaways"], ["overview", "Overview"], ["sections", "Sections"], ["glossary", "Glossary"], ["diagram", "Diagram"]];
+    let md = `# ${title}\n\n`;
+    let any = false;
+    for (const [k, label] of order) { if (out[k]) { md += `## ${label}\n\n${out[k]}\n\n`; any = true; } }
+    if (!any) { setError("Nothing generated to export yet."); return; }
+    const blob = new Blob([md], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${title.replace(/[^\w.-]+/g, "_")}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   const analysisPanel = (which) => (
@@ -314,12 +324,17 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
           {loading[which] ? "Generating…" : out[which] ? "Regenerate" : "Generate"}
         </button>
         {loading[which] && <span className="loading-line"><span className="spinner" /> Querying {modelLabel}…</span>}
+        {out[which] && !loading[which] && (
+          <div className="out-tools">
+            <button className={`chip ${copied === which ? "ok" : ""}`} onClick={() => copyOut(which)}>{copied === which ? "Copied" : "Copy"}</button>
+          </div>
+        )}
       </div>
-      {out[which] ? (
-        <div className="prose">{renderRichText(out[which])}</div>
-      ) : (
-        !loading[which] && <div className="placeholder">{pdfDoc ? `The ${which} will appear here.` : "Loading…"}</div>
-      )}
+      {loading[which] && streamBuf[which]
+        ? <div className="prose"><Prose text={streamBuf[which]} /></div>
+        : out[which]
+          ? <RichText text={out[which]} />
+          : (!loading[which] && <div className="placeholder">The {which} will appear here.</div>)}
     </>
   );
 
@@ -335,17 +350,12 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
         <div className="right">
           {!hasKey && <Link href="/settings" className="warn-link">Set API key →</Link>}
           <input
-            className="input model-input"
-            list="vmodels"
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            placeholder="model name"
-            spellCheck={false}
+            className="input model-input" list="vmodels" value={model}
+            onChange={(e) => setModel(e.target.value)} placeholder="model name" spellCheck={false}
             title="Ollama model — type any name or pick from the list"
           />
-          <datalist id="vmodels">
-            {models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
-          </datalist>
+          <datalist id="vmodels">{models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}</datalist>
+          <ThemeToggle />
         </div>
       </div>
 
@@ -364,22 +374,42 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
                 <button className="iconbtn" disabled={pageNum <= 1} onClick={() => setPageNum((n) => Math.max(1, n - 1))}>‹</button>
                 <span className="page-info">{pageNum} / {numPages}</span>
                 <button className="iconbtn" disabled={pageNum >= numPages} onClick={() => setPageNum((n) => Math.min(numPages, n + 1))}>›</button>
+                <span style={{ width: 8 }} />
+                <div className="zoom-group">
+                  <button className="iconbtn" onClick={() => setScale((s) => clamp(s - 0.2, 0.5, 3))} title="Zoom out">−</button>
+                  <span className="zoom-level">{Math.round(scale * 100)}%</span>
+                  <button className="iconbtn" onClick={() => setScale((s) => clamp(s + 0.2, 0.5, 3))} title="Zoom in">+</button>
+                  <button className="iconbtn" onClick={fitWidth} title="Fit width" style={{ width: "auto", padding: "0 8px", fontSize: 13 }}>Fit</button>
+                </div>
                 <div style={{ flex: 1 }} />
                 <button className="btn-sm" onClick={explainSelection}>✦ Explain selection</button>
               </div>
-              <div className="pdf-scroll">
-                <div className="pdf-stage" onMouseUp={onMouseUpPage}>
+              <div className="pdf-scroll" ref={attachScroll}>
+                <div className="pdf-stage" ref={stageRef} onMouseUp={onMouseUpPage}>
                   <canvas ref={canvasRef} className="pdf-canvas" />
                   <div ref={textLayerRef} className="textLayer" />
+                  <div className="hl-layer">
+                    {highlights.filter((h) => h.page === pageNum).flatMap((h) =>
+                      h.rects.map((r, i) => (
+                        <div key={h.id + "-" + i} className="hl-rect"
+                          style={{ left: r.left * scale, top: r.top * scale, width: r.width * scale, height: r.height * scale }}
+                          title="Click to explain this highlight"
+                          onClick={(e) => { e.stopPropagation(); explainText(h.text); }} />
+                      ))
+                    )}
+                  </div>
                 </div>
               </div>
               {highlights.length > 0 && (
                 <div className="highlight-tray">
                   <div className="tray-title">Highlights ({highlights.length})</div>
-                  {highlights.slice(-6).reverse().map((h, i) => (
-                    <div key={i} className="tray-item">
+                  {highlights.slice(-6).reverse().map((h) => (
+                    <div key={h.id} className="tray-item">
                       <span className="pg">p{h.page}</span>
-                      <span className="tx">{h.text.slice(0, 120)}{h.text.length > 120 ? "…" : ""}</span>
+                      <span className="tx" style={{ cursor: "pointer", flex: 1 }} onClick={() => explainText(h.text)}>
+                        {h.text.slice(0, 110)}{h.text.length > 110 ? "…" : ""}
+                      </span>
+                      <button className="link-btn" style={{ margin: 0 }} onClick={() => removeHighlight(h.id)}>×</button>
                     </div>
                   ))}
                 </div>
@@ -392,10 +422,9 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
         <div className="panel-pane">
           <div className="level-row">
             <span className="level-label">Level</span>
-            {level
-              ? <span className="pill">{LEVELS.find((l) => l.id === level)?.label}</span>
-              : <span className="pill none">not set</span>}
+            {level ? <span className="pill">{LEVELS.find((l) => l.id === level)?.label}</span> : <span className="pill none">not set</span>}
             <button className="link-btn" onClick={() => setShowLevelGate(true)}>change</button>
+            <div className="out-tools"><button className="chip" onClick={exportAll} title="Download all analyses as Markdown">Export</button></div>
           </div>
 
           <div className="tabbar">
@@ -408,51 +437,60 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
             <div className="chat-wrap">
               <div className="chat-scroll" ref={chatScrollRef}>
                 {messages.length === 0 && !chatBusy && (
-                  <div className="chat-empty">Ask anything about “{title}” — the model answers grounded in the paper text.</div>
+                  <div className="chat-empty">Ask anything about “{title}” — answers are grounded in the paper and tuned to your level.</div>
                 )}
                 {messages.map((m, i) => (
                   <div key={i} className={`msg ${m.role}`}>
-                    {m.role === "assistant" ? <div className="prose">{renderRichText(m.content)}</div> : m.content}
+                    {m.role === "assistant" ? <RichText text={m.content} /> : m.content}
                   </div>
                 ))}
-                {chatBusy && <div className="msg assistant"><span className="spinner" /> Thinking…</div>}
+                {chatBusy && (
+                  <div className="msg assistant">
+                    {chatStreaming ? <div className="prose"><Prose text={chatStreaming} /></div> : <><span className="spinner" /> Thinking…</>}
+                  </div>
+                )}
               </div>
               <div className="chat-input-row">
-                <input
-                  className="input"
-                  placeholder={hasKey ? "Ask about the paper…" : "Set an API key in Settings first"}
-                  value={chatInput}
-                  disabled={!hasKey}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } }}
-                />
+                <input className="input" placeholder={hasKey ? "Ask about the paper…" : "Set an API key in Settings first"}
+                  value={chatInput} disabled={!hasKey} onChange={(e) => setChatInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } }} />
                 <button className="btn" onClick={sendChat} disabled={chatBusy || !chatInput.trim()}>Send</button>
               </div>
             </div>
           ) : (
             <div className="panel-scroll">
-              {tab === "diagram" ? (
+              {tab === "overview" && (
+                <>
+                  {(out.tldr || (loading.tldr && streamBuf.tldr)) && (
+                    <div className="tldr">
+                      <div className="tldr-title">Key takeaways</div>
+                      {loading.tldr && streamBuf.tldr ? <div className="prose"><Prose text={streamBuf.tldr} /></div> : <RichText text={out.tldr} />}
+                    </div>
+                  )}
+                  {analysisPanel("overview")}
+                </>
+              )}
+              {tab === "sections" && analysisPanel("sections")}
+              {tab === "glossary" && analysisPanel("glossary")}
+              {tab === "diagram" && (
                 <>
                   <div className="diagram-form">
-                    <input
-                      className="input"
-                      placeholder="Describe the diagram you want (optional) — e.g. “the training loop”, “data flow”"
-                      value={diagramRequest}
-                      onChange={(e) => setDiagramRequest(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === "Enter") generate("diagram", { request: diagramRequest }); }}
-                    />
+                    <input className="input" placeholder="Describe the diagram you want (optional) — e.g. “the training loop”, “data flow”"
+                      value={diagramRequest} onChange={(e) => setDiagramRequest(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") generate("diagram", { request: diagramRequest }); }} />
                     <button className="btn" style={{ width: "auto", padding: "0 18px" }}
-                            disabled={loading.diagram || !pdfDoc || !hasKey}
-                            onClick={() => generate("diagram", { request: diagramRequest })}>
+                      disabled={loading.diagram || !pdfDoc || !hasKey}
+                      onClick={() => generate("diagram", { request: diagramRequest })}>
                       {loading.diagram ? "…" : out.diagram ? "Regenerate" : "Generate"}
                     </button>
                   </div>
-                  {loading.diagram && <div className="loading-line"><span className="spinner" /> Drawing with {modelLabel}…</div>}
-                  {out.diagram ? <div className="prose">{renderRichText(out.diagram)}</div>
-                    : !loading.diagram && <div className="placeholder">Describe a diagram above (or leave blank for the core method) and hit Generate.</div>}
+                  {loading.diagram && streamBuf.diagram
+                    ? <div className="prose"><Prose text={streamBuf.diagram} /></div>
+                    : out.diagram
+                      ? <RichText text={out.diagram} />
+                      : (!loading.diagram && <div className="placeholder">Describe a diagram above (or leave blank for the core method) and hit Generate.</div>)}
+                  {loading.diagram && !streamBuf.diagram && <div className="loading-line"><span className="spinner" /> Drawing with {modelLabel}…</div>}
                 </>
-              ) : (
-                analysisPanel(tab)
               )}
             </div>
           )}
@@ -464,7 +502,7 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
         <div className="modal-overlay" onClick={() => level && setShowLevelGate(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <h2 className="modal-title">How deep should I go?</h2>
-            <p className="modal-sub">Pick the comprehension level. Every explanation, diagram, glossary entry, and chat reply is tuned to it. You can change it any time.</p>
+            <p className="modal-sub">Pick the comprehension level. Every explanation, diagram, glossary entry, and chat reply is tuned to it. Change it any time.</p>
             <div className="level-grid">
               {LEVELS.map((l) => (
                 <button key={l.id} className={`level-card ${level === l.id ? "active" : ""}`} onClick={() => chooseLevel(l.id)}>
@@ -486,9 +524,9 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
               <button className="popup-close" onClick={() => setExplainPopup(null)}>×</button>
             </div>
             <div className="popup-quote">“{explainPopup.text.slice(0, 280)}{explainPopup.text.length > 280 ? "…" : ""}”</div>
-            <div className="prose">
-              {explainPopup.loading ? <span className="loading-line"><span className="spinner" /> Thinking…</span> : <Prose text={explainPopup.body} />}
-            </div>
+            {explainPopup.loading
+              ? <div className="prose">{explainPopup.body ? <Prose text={explainPopup.body} /> : <span className="loading-line"><span className="spinner" /> Thinking…</span>}</div>
+              : <RichText text={explainPopup.body} />}
           </div>
         </div>
       )}
