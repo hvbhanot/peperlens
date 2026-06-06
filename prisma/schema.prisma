@@ -43,7 +43,7 @@ model Paper {
   // Pre-extracted text so we can re-query without re-parsing the PDF.
   textCache String?
   createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  updatedAt DateTime @default(now()) @updatedAt
 
   analyses  Analysis[]
   notes     Note[]
