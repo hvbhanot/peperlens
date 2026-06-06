@@ -3,14 +3,15 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import Link from "next/link";
 import { getPdfJs } from "@/lib/pdfClient";
-import { LEVELS } from "@/lib/prompts";
-import { RichText, Prose } from "@/components/RichText";
+import { LEVELS, SUMMARIZATION_MODES, summaryModeById } from "@/lib/prompts";
+import { RichText, Prose, TweetThread } from "@/components/RichText";
 import ThemeToggle from "@/components/ThemeToggle";
+import NotesPanel from "@/components/NotesPanel";
+import FlashcardsPanel from "@/components/FlashcardsPanel";
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 // Streamed POST: yields the growing text via onText, returns the full string.
-// Pre-stream failures arrive as JSON and are surfaced as thrown errors.
 async function streamPost(url, body, onText) {
   const res = await fetch(url, {
     method: "POST",
@@ -42,10 +43,14 @@ const TABS = [
   ["sections", "Sections"],
   ["diagram", "Diagram"],
   ["glossary", "Glossary"],
+  ["modes", "Summary modes"],
+  ["questions", "Questions"],
+  ["flashcards", "Cards"],
+  ["notes", "Notes"],
   ["chat", "Chat"],
 ];
 
-export default function PaperLensViewer({ paperId, title, fileName, initialLevel }) {
+export default function PaperLensViewer({ paperId, title, fileName, initialLevel, initialTags }) {
   const [model, setModel] = useState("");
   const [models, setModels] = useState([]);
   const [hasKey, setHasKey] = useState(true);
@@ -68,6 +73,8 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
   const [error, setError] = useState("");
 
   const [diagramRequest, setDiagramRequest] = useState("");
+  const [summaryMode, setSummaryMode] = useState("eli5");
+  const [questionDifficulty, setQuestionDifficulty] = useState("mixed");
 
   const [highlights, setHighlights] = useState([]);
   const [explainPopup, setExplainPopup] = useState(null);
@@ -76,6 +83,9 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
   const [chatInput, setChatInput] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
   const [chatStreaming, setChatStreaming] = useState("");
+
+  const [tags, setTags] = useState(initialTags || []);
+  const [tagBusy, setTagBusy] = useState(false);
 
   const canvasRef = useRef(null);
   const textLayerRef = useRef(null);
@@ -89,7 +99,6 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
 
   const modelLabel = models.find((m) => m.id === model)?.label || model;
 
-  // ---- Settings ----
   useEffect(() => {
     (async () => {
       try {
@@ -100,7 +109,8 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
     })();
   }, []);
 
-  // ---- Load stored PDF + extract text ----
+  // Load PDF + extract text. Also save the extracted text to the server cache
+  // (so the chat/compare/tag routes can re-use it without re-parsing the PDF).
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -114,13 +124,22 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
         setNumPages(doc.numPages);
 
         let collected = "";
-        const cap = Math.min(doc.numPages, 40);
+        const cap = Math.min(doc.numPages, 60);
         for (let p = 1; p <= cap; p++) {
           const page = await doc.getPage(p);
           const tc = await page.getTextContent();
           collected += tc.items.map((it) => it.str).join(" ") + "\n\n";
         }
         if (alive) setFullText(collected);
+
+        // Persist the text cache (fire-and-forget).
+        if (collected) {
+          fetch(`/api/papers/${paperId}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ textCache: collected }),
+          }).catch(() => {});
+        }
       } catch (e) {
         if (alive) setError("Could not open PDF: " + (e.message || e));
       } finally {
@@ -130,7 +149,6 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
     return () => { alive = false; };
   }, [paperId]);
 
-  // ---- Render current page + selectable text layer ----
   useEffect(() => {
     if (!pdfDoc) return;
     let cancelled = false;
@@ -165,7 +183,7 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
     return () => { cancelled = true; };
   }, [pdfDoc, pageNum, scale]);
 
-  // ---- Auto-generate TL;DR + overview/sections/glossary once per open ----
+  // Auto-generate the core set once per open.
   useEffect(() => {
     if (autoRanRef.current) return;
     if (!fullText || !level || !hasKey) return;
@@ -174,6 +192,8 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
       for (const which of ["tldr", "overview", "sections", "glossary"]) {
         await generate(which);
       }
+      // Auto-tag the paper in the background.
+      autoTag();
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fullText, level, hasKey]);
@@ -182,7 +202,31 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
     chatScrollRef.current?.scrollTo({ top: chatScrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, chatStreaming, chatBusy]);
 
-  // Fit-to-width when the scroll container first mounts.
+  // Load chat history on first mount (if a level is set).
+  useEffect(() => {
+    if (!level) return;
+    (async () => {
+      try {
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ messages: [], context: "", level, paperId, loadHistory: 1 }),
+        });
+        if (!res.ok) return;
+        const reader = res.body.getReader();
+        // The endpoint streams; if the body is empty (no history), nothing to read.
+        // We just discard the stream — chat state stays empty.
+        try {
+          while (true) {
+            const { done } = await reader.read();
+            if (done) break;
+          }
+        } catch {/* ignore */}
+      } catch {/* non-fatal */}
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const attachScroll = useCallback((node) => {
     pdfScrollRef.current = node;
     if (node && baseWidthRef.current && !fittedRef.current) {
@@ -203,6 +247,8 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
     fetch(`/api/papers/${paperId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ level: id }) }).catch(() => {});
   };
 
+  const explainUrl = (which) => `/api/explain?cache=1&paperId=${encodeURIComponent(paperId)}`;
+
   const generate = async (which, opts = {}) => {
     if (!level) { setShowLevelGate(true); return; }
     if (!fullText) { setError("The paper text is still loading."); return; }
@@ -212,8 +258,8 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
     setStreamBuf((s) => ({ ...s, [which]: "" }));
     try {
       const full = await streamPost(
-        "/api/explain",
-        { which, level, text: fullText, fileName, model, request: opts.request },
+        explainUrl(which),
+        { which, level, text: fullText, fileName, model, request: opts.request, mode: opts.mode, difficulty: opts.difficulty, count: opts.count },
         (t) => setStreamBuf((s) => ({ ...s, [which]: t }))
       );
       setOut((o) => ({ ...o, [which]: full }));
@@ -232,7 +278,7 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
     setExplainPopup({ text: txt, body: "", loading: true });
     try {
       const full = await streamPost(
-        "/api/explain",
+        explainUrl("selection"),
         { which: "selection", level, text: txt, fileName, model },
         (t) => setExplainPopup((p) => (p ? { ...p, body: t } : p))
       );
@@ -249,7 +295,6 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
     explainText(txt);
   };
 
-  // Capture a selection as a clickable highlight (rects normalized to scale 1).
   const onMouseUpPage = useCallback(() => {
     const sel = window.getSelection();
     const txt = sel ? sel.toString().trim() : "";
@@ -272,6 +317,14 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
   }, [pageNum, scale]);
 
   const removeHighlight = (id) => setHighlights((h) => h.filter((x) => x.id !== id));
+  const highlightAsNote = (h) => {
+    fetch(`/api/papers/${paperId}/notes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ body: h.text, page: h.page }),
+    });
+    setTab("notes");
+  };
 
   const sendChat = async () => {
     const text = chatInput.trim();
@@ -284,7 +337,7 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
     setChatBusy(true);
     setChatStreaming("");
     try {
-      const full = await streamPost("/api/chat", { messages: next, context: fullText, level, model }, (t) => setChatStreaming(t));
+      const full = await streamPost("/api/chat", { messages: next, context: fullText, level, model, paperId }, (t) => setChatStreaming(t));
       setMessages((m) => [...m, { role: "assistant", content: full }]);
     } catch (e) {
       setMessages((m) => [...m, { role: "assistant", content: "Error: " + (e.message || e) }]);
@@ -292,6 +345,16 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
       setChatBusy(false);
       setChatStreaming("");
     }
+  };
+
+  const autoTag = async () => {
+    if (!hasKey || tagBusy) return;
+    setTagBusy(true);
+    try {
+      const res = await fetch(`/api/papers/${paperId}/tag`, { method: "POST" });
+      const d = await res.json();
+      if (res.ok && d.paper) setTags(d.paper.tags || []);
+    } catch {/* ignore */} finally { setTagBusy(false); }
   };
 
   const copyOut = (which) => {
@@ -340,10 +403,9 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
 
   return (
     <div className="viewer">
-      {/* Top bar */}
       <div className="viewer-top">
         <div className="left">
-          <Link href="/dashboard" className="back-link">‹ Dashboard</Link>
+          <Link href="/dashboard" className="back-link">‹ Library</Link>
           <span className="brand-mark">◧</span>
           <span className="paper-title" title={title}>{title}</span>
         </div>
@@ -362,7 +424,6 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
       {error && <div className="error" style={{ margin: 0, borderRadius: 0 }}>{error}</div>}
 
       <div className="viewer-body">
-        {/* Left: PDF */}
         <div className="pdf-pane">
           {loadingPdf ? (
             <div className="empty-state"><span className="spinner" /> Loading PDF…</div>
@@ -413,6 +474,7 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
                       <span className="tx" style={{ cursor: "pointer", flex: 1 }} onClick={() => explainText(h.text)}>
                         {h.text.slice(0, 110)}{h.text.length > 110 ? "…" : ""}
                       </span>
+                      <button className="link-btn" style={{ margin: 0 }} title="Save as note" onClick={() => highlightAsNote(h)}>＋</button>
                       <button className="link-btn" style={{ margin: 0 }} onClick={() => removeHighlight(h.id)}>×</button>
                     </div>
                   ))}
@@ -422,14 +484,24 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
           )}
         </div>
 
-        {/* Right: panel */}
         <div className="panel-pane">
           <div className="level-row">
             <span className="level-label">Level</span>
             {level ? <span className="pill">{LEVELS.find((l) => l.id === level)?.label}</span> : <span className="pill none">not set</span>}
             <button className="link-btn" onClick={() => setShowLevelGate(true)}>change</button>
-            <div className="out-tools"><button className="chip" onClick={exportAll} title="Download all analyses as Markdown">Export</button></div>
+            <div className="out-tools">
+              <button className="chip" onClick={autoTag} disabled={tagBusy || !hasKey} title="AI tag this paper">
+                {tagBusy ? "…" : tags.length ? `Tags (${tags.length})` : "Auto-tag"}
+              </button>
+              <button className="chip" onClick={exportAll} title="Download all analyses as Markdown">Export</button>
+            </div>
           </div>
+
+          {tags.length > 0 && (
+            <div className="tag-strip">
+              {tags.map((t) => <span key={t} className="tag-chip">{t}</span>)}
+            </div>
+          )}
 
           <div className="tabbar">
             {TABS.map(([id, lbl]) => (
@@ -460,6 +532,60 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
                   onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } }} />
                 <button className="btn" onClick={sendChat} disabled={chatBusy || !chatInput.trim()}>Send</button>
               </div>
+            </div>
+          ) : tab === "notes" ? (
+            <div className="panel-scroll">
+              <NotesPanel paperId={paperId} currentPage={pageNum} />
+            </div>
+          ) : tab === "flashcards" ? (
+            <div className="panel-scroll">
+              <FlashcardsPanel paperId={paperId} level={level} model={model} />
+            </div>
+          ) : tab === "modes" ? (
+            <div className="panel-scroll">
+              <div className="mode-grid">
+                {SUMMARIZATION_MODES.map((m) => (
+                  <button
+                    key={m.id}
+                    className={`mode-card ${summaryMode === m.id ? "active" : ""}`}
+                    onClick={() => { setSummaryMode(m.id); generate("summary_mode", { mode: m.id }); }}
+                  >
+                    <div className="mode-card-title">{m.label}</div>
+                    <div className="mode-card-desc">{m.desc}</div>
+                  </button>
+                ))}
+              </div>
+              {loading.summary_mode && streamBuf.summary_mode && (
+                <div className="prose" style={{ marginTop: 16 }}>
+                  <Prose text={streamBuf.summary_mode} />
+                </div>
+              )}
+              {out.summary_mode && !loading.summary_mode && (
+                <div style={{ marginTop: 16 }}>
+                  {summaryMode === "twitter"
+                    ? <TweetThread text={out.summary_mode} />
+                    : <RichText text={out.summary_mode} />}
+                </div>
+              )}
+              {!out.summary_mode && !loading.summary_mode && (
+                <div className="placeholder" style={{ marginTop: 16 }}>
+                  Pick a mode to generate a different angle on the paper. Your selection is remembered.
+                </div>
+              )}
+            </div>
+          ) : tab === "questions" ? (
+            <div className="panel-scroll">
+              <div className="diff-row">
+                <span className="muted">Difficulty:</span>
+                {["easy", "medium", "hard", "mixed"].map((d) => (
+                  <button
+                    key={d}
+                    className={`chip ${questionDifficulty === d ? "ok" : ""}`}
+                    onClick={() => { setQuestionDifficulty(d); generate("questions", { difficulty: d, count: 10 }); }}
+                  >{d}</button>
+                ))}
+              </div>
+              {analysisPanel("questions")}
             </div>
           ) : (
             <div className="panel-scroll">
@@ -501,7 +627,6 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
         </div>
       </div>
 
-      {/* Level gate */}
       {showLevelGate && (
         <div className="modal-overlay" onClick={() => level && setShowLevelGate(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -519,13 +644,15 @@ export default function PaperLensViewer({ paperId, title, fileName, initialLevel
         </div>
       )}
 
-      {/* Explain-selection popup */}
       {explainPopup && (
         <div className="modal-overlay" onClick={() => setExplainPopup(null)}>
           <div className="modal popup" onClick={(e) => e.stopPropagation()}>
             <div className="popup-head">
               <span className="popup-tag">✦ Selection</span>
-              <button className="popup-close" onClick={() => setExplainPopup(null)}>×</button>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button className="link-btn" onClick={() => highlightAsNote({ text: explainPopup.text, page: pageNum })}>Save as note</button>
+                <button className="popup-close" onClick={() => setExplainPopup(null)}>×</button>
+              </div>
             </div>
             <div className="popup-quote">“{explainPopup.text.slice(0, 280)}{explainPopup.text.length > 280 ? "…" : ""}”</div>
             {explainPopup.loading

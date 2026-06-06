@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/auth";
 import { decrypt } from "@/lib/crypto";
 import { ollamaStream } from "@/lib/ollama";
@@ -19,8 +20,29 @@ export async function POST(req) {
   const body = await req.json().catch(() => ({}));
   const history = Array.isArray(body.messages) ? body.messages : [];
   const context = typeof body.context === "string" ? body.context : "";
+  const paperId = typeof body.paperId === "string" ? body.paperId : null;
   if (history.length === 0) {
     return NextResponse.json({ error: "No message to send." }, { status: 400 });
+  }
+
+  // Optional history loading: if `loadHistory=1` and a paperId is given,
+  // rehydrate from the persistent log (and ignore the client history).
+  let trimmed = history
+    .filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
+    .slice(-12)
+    .map((m) => ({ role: m.role, content: m.content }));
+
+  if (paperId && body.loadHistory) {
+    const owned = await prisma.paper.findFirst({ where: { id: paperId, userId: user.id }, select: { id: true } });
+    if (owned) {
+      const rows = await prisma.chatLog.findMany({
+        where: { paperId },
+        orderBy: { createdAt: "desc" },
+        take: 12,
+        select: { role: true, content: true },
+      });
+      trimmed = rows.reverse().map((r) => ({ role: r.role, content: r.content }));
+    }
   }
 
   const lvl = levelById(body.level);
@@ -28,11 +50,6 @@ export async function POST(req) {
     lvl.sys +
     " You are a research assistant answering questions about the paper below. Ground every answer in the paper; if something isn't covered, say so plainly. Use markdown, and LaTeX ($...$ or $$...$$) for any math.\n\n=== PAPER TEXT ===\n" +
     context.slice(0, 12000);
-
-  const trimmed = history
-    .filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
-    .slice(-12)
-    .map((m) => ({ role: m.role, content: m.content }));
 
   const model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : user.ollamaModel;
 
@@ -43,7 +60,20 @@ export async function POST(req) {
     return NextResponse.json({ error: "Stored key could not be decrypted. Re-save it in Settings." }, { status: 500 });
   }
 
+  // Persist the latest user turn immediately (the assistant turn is logged on
+  // completion of the stream).
+  const lastUser = [...trimmed].reverse().find((m) => m.role === "user");
+  if (paperId && lastUser) {
+    try {
+      const owned = await prisma.paper.findFirst({ where: { id: paperId, userId: user.id }, select: { id: true } });
+      if (owned) {
+        await prisma.chatLog.create({ data: { paperId, role: "user", content: lastUser.content.slice(0, 8000) } });
+      }
+    } catch {/* non-fatal */}
+  }
+
   const encoder = new TextEncoder();
+  let accumulated = "";
   const stream = new ReadableStream({
     async start(controller) {
       try {
@@ -56,7 +86,19 @@ export async function POST(req) {
         });
         for await (const part of it) {
           const t = part?.message?.content || "";
-          if (t) controller.enqueue(encoder.encode(t));
+          if (t) {
+            accumulated += t;
+            controller.enqueue(encoder.encode(t));
+          }
+        }
+        // Log the assistant turn.
+        if (paperId && accumulated) {
+          try {
+            const owned = await prisma.paper.findFirst({ where: { id: paperId, userId: user.id }, select: { id: true } });
+            if (owned) {
+              await prisma.chatLog.create({ data: { paperId, role: "assistant", content: accumulated.slice(0, 8000) } });
+            }
+          } catch {/* non-fatal */}
         }
       } catch (e) {
         controller.enqueue(encoder.encode(`\n\n⚠️ Ollama request failed: ${String(e.message || e).slice(0, 300)}`));

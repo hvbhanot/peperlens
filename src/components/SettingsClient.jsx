@@ -1,15 +1,19 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
+import { CLOUD_MODELS } from "@/lib/models";
 
 export default function SettingsClient() {
   const [hasKey, setHasKey] = useState(false);
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState("");
   const [host, setHost] = useState("");
-  const [models, setModels] = useState([]);
+  const [models, setModels] = useState(CLOUD_MODELS);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState(null);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
 
@@ -21,7 +25,7 @@ export default function SettingsClient() {
         setHasKey(data.hasKey);
         setModel(data.model);
         setHost(data.host);
-        setModels(data.models);
+        setModels(data.models || CLOUD_MODELS);
       } else {
         setError(data.error || "Failed to load settings.");
       }
@@ -36,7 +40,6 @@ export default function SettingsClient() {
     setSaving(true);
     try {
       const payload = { model, host };
-      // Only send the key field when the user typed something new.
       if (apiKey.trim()) payload.apiKey = apiKey.trim();
 
       const res = await fetch("/api/settings", {
@@ -77,6 +80,39 @@ export default function SettingsClient() {
     setSaving(false);
   };
 
+  const test = async () => {
+    setTesting(true);
+    setTestResult(null);
+    setError("");
+    try {
+      // The test reuses the chat endpoint with a minimal request.
+      const res = await fetch("/api/explain", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ which: "tldr", level: "undergrad", text: "Hello world", model }),
+      });
+      if (res.ok) {
+        // Drain the body so the connection is closed cleanly.
+        const reader = res.body.getReader();
+        let buf = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += new TextDecoder().decode(value);
+          if (buf.length > 12) break; // we just need to know it streams back
+        }
+        setTestResult({ ok: true, msg: "Model responded." });
+      } else {
+        const j = await res.json().catch(() => ({}));
+        setTestResult({ ok: false, msg: j.error || `HTTP ${res.status}` });
+      }
+    } catch (e) {
+      setTestResult({ ok: false, msg: String(e.message || e) });
+    } finally {
+      setTesting(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="center-wrap">
@@ -86,21 +122,24 @@ export default function SettingsClient() {
   }
 
   return (
-    <div className="center-wrap">
-      <form className="card" onSubmit={save} style={{ maxWidth: 480 }}>
-        <h1>Settings</h1>
-        <p className="sub">
-          Your Ollama API key is encrypted (AES-256-GCM) before it touches the database and is
-          only decrypted server-side when explaining a paper.
-        </p>
+    <div className="settings-wrap">
+      <form className="settings-card" onSubmit={save}>
+        <div className="settings-head">
+          <h1>Settings</h1>
+          <p className="muted">
+            Your Ollama API key is encrypted (AES-256-GCM) before it touches the database and is
+            only decrypted server-side when explaining a paper. Bring your own key, switch models anytime.
+          </p>
+        </div>
 
         {error && <div className="error">{error}</div>}
         {saved && <div className="notice">Saved.</div>}
 
-        <div className="field">
-          <label>
-            OLLAMA API KEY {hasKey && <span style={{ color: "var(--accent)" }}>● key on file</span>}
-          </label>
+        <div className="settings-section">
+          <div className="section-label">
+            <span>API key</span>
+            {hasKey && <span className="status-dot ok" title="Key on file">●</span>}
+          </div>
           <input
             className="input"
             type="password"
@@ -109,21 +148,26 @@ export default function SettingsClient() {
             onChange={(e) => setApiKey(e.target.value)}
             autoComplete="off"
           />
-          {hasKey && (
-            <button
-              type="button"
-              className="btn btn-danger"
-              style={{ marginTop: 8 }}
-              onClick={clearKey}
-              disabled={saving}
-            >
-              Remove stored key
+          <div className="row">
+            {hasKey && (
+              <button type="button" className="btn btn-ghost btn-compact" onClick={clearKey} disabled={saving}>
+                Remove key
+              </button>
+            )}
+            <button type="button" className="btn btn-ghost btn-compact" onClick={test} disabled={testing || !hasKey}>
+              {testing ? "Testing…" : "Test connection"}
             </button>
-          )}
+            {testResult && (
+              <span className={testResult.ok ? "ok-pill" : "err-pill"}>{testResult.ok ? "✓ " : "⚠ "}{testResult.msg}</span>
+            )}
+            <Link href="https://ollama.com/settings/keys" target="_blank" rel="noreferrer" className="link-pri">
+              Get a key →
+            </Link>
+          </div>
         </div>
 
-        <div className="field">
-          <label>DEFAULT MODEL</label>
+        <div className="settings-section">
+          <div className="section-label"><span>Default model</span></div>
           <input
             className="input mono"
             list="model-suggestions"
@@ -137,25 +181,30 @@ export default function SettingsClient() {
               <option key={m.id} value={m.id}>{m.label}</option>
             ))}
           </datalist>
-          <p className="muted" style={{ marginTop: 6, fontSize: 12 }}>
+          <p className="muted" style={{ fontSize: 12 }}>
             Type any Ollama model name, or pick a Cloud model from the list.
           </p>
         </div>
 
-        <div className="field">
-          <label>OLLAMA HOST</label>
+        <div className="settings-section">
+          <div className="section-label"><span>Ollama host</span></div>
           <input
-            className="input"
+            className="input mono"
             value={host}
             onChange={(e) => setHost(e.target.value)}
             spellCheck={false}
             placeholder="https://ollama.com"
           />
+          <p className="muted" style={{ fontSize: 12 }}>
+            For local Ollama, use <code>http://localhost:11434</code>. Ollama Cloud uses <code>https://ollama.com</code>.
+          </p>
         </div>
 
-        <button className="btn" type="submit" disabled={saving}>
-          {saving ? "Saving…" : "Save settings"}
-        </button>
+        <div className="actions-row">
+          <button className="btn btn-compact" type="submit" disabled={saving}>
+            {saving ? "Saving…" : "Save settings"}
+          </button>
+        </div>
       </form>
     </div>
   );

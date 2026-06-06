@@ -54,7 +54,6 @@ function splitRow(line) {
   return s.split("|").map((c) => c.trim());
 }
 
-// A GFM table separator row, e.g. |----|:---:|
 const isTableSep = (l) => {
   const t = l.trim();
   return t.includes("|") && t.includes("-") && /^[\s:|-]+$/.test(t);
@@ -70,7 +69,6 @@ export function Prose({ text }) {
   while (i < lines.length) {
     const ln = lines[i];
 
-    // Table: a row with pipes immediately followed by a separator row.
     if (ln.includes("|") && i + 1 < lines.length && isTableSep(lines[i + 1])) {
       const header = splitRow(ln);
       const rows = [];
@@ -90,9 +88,18 @@ export function Prose({ text }) {
 
     if (!ln.trim()) { els.push(<div key={key++} style={{ height: 6 }} />); i++; continue; }
     if (/^(-{3,}|\*{3,}|_{3,})\s*$/.test(ln.trim())) { els.push(<hr key={key++} className="md-hr" />); i++; continue; }
+    if (ln.startsWith("#### ")) { els.push(<h5 key={key++}>{inline(ln.slice(5))}</h5>); i++; continue; }
     if (ln.startsWith("### ")) { els.push(<h4 key={key++}>{inline(ln.slice(4))}</h4>); i++; continue; }
     if (ln.startsWith("## ")) { els.push(<h3 key={key++}>{inline(ln.slice(3))}</h3>); i++; continue; }
     if (ln.startsWith("# ")) { els.push(<h2 key={key++}>{inline(ln.slice(2))}</h2>); i++; continue; }
+
+    // Block quote
+    if (/^>\s+/.test(ln)) {
+      const buf = [];
+      while (i < lines.length && /^>\s+/.test(lines[i])) { buf.push(lines[i].replace(/^>\s+/, "")); i++; }
+      els.push(<blockquote key={key++} className="md-quote">{inline(buf.join(" "))}</blockquote>);
+      continue;
+    }
 
     const om = ln.match(/^\s*(\d+)\.\s+(.*)/);
     if (om) { els.push(<div key={key++} className="bullet"><span className="dot num">{om[1]}.</span><span>{inline(om[2])}</span></div>); i++; continue; }
@@ -144,11 +151,25 @@ export function RichText({ text, className = "prose" }) {
     return () => { alive = false; };
   }, [text]);
 
-  // key by content so React fully remounts the subtree on change, preventing
-  // conflicts between React reconciliation and KaTeX's DOM mutations.
   return (
     <div className={className} ref={ref} key={text.length + "|" + text.slice(0, 24)}>
       {renderParts(text)}
+    </div>
+  );
+}
+
+// A bare-bones "twitter thread" renderer: one card per line, large readable text.
+export function TweetThread({ text }) {
+  const tweets = text.split("\n").map((t) => t.trim()).filter((t) => /^\d+\/\s?/.test(t));
+  if (tweets.length === 0) return <RichText text={text} />;
+  return (
+    <div className="tweet-thread">
+      {tweets.map((t, i) => (
+        <div key={i} className="tweet-card">
+          <div className="tweet-num">{(t.match(/^(\d+)/) || [, ""])[1]}/{tweets.length}</div>
+          <div className="tweet-body">{t.replace(/^\d+\/?\s*/, "").trim()}</div>
+        </div>
+      ))}
     </div>
   );
 }

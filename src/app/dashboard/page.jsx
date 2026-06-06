@@ -1,4 +1,5 @@
 import { redirect } from "next/navigation";
+import { Suspense } from "react";
 import { getCurrentUser } from "@/lib/auth";
 import TopBar from "@/components/TopBar";
 import DashboardClient from "@/components/DashboardClient";
@@ -12,7 +13,9 @@ export default async function DashboardPage() {
   return (
     <>
       <TopBar email={user.email} />
-      <DashboardClient hasKey={Boolean(user.ollamaKeyEnc)} />
+      <Suspense fallback={<div className="muted" style={{ padding: 40 }}>Loading…</div>}>
+        <DashboardClient hasKey={Boolean(user.ollamaKeyEnc)} />
+      </Suspense>
     </>
   );
 }

@@ -11,7 +11,7 @@ export default async function PaperPage({ params }) {
 
   const paper = await prisma.paper.findFirst({
     where: { id: params.id, userId: user.id },
-    select: { id: true, title: true, fileName: true, level: true },
+    select: { id: true, title: true, fileName: true, level: true, tags: true },
   });
   if (!paper) notFound();
 
@@ -21,6 +21,7 @@ export default async function PaperPage({ params }) {
       title={paper.title}
       fileName={paper.fileName}
       initialLevel={paper.level}
+      initialTags={paper.tags || []}
     />
   );
 }

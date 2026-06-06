@@ -14,7 +14,10 @@ export async function GET() {
   const papers = await prisma.paper.findMany({
     where: { userId: user.id },
     orderBy: { createdAt: "desc" },
-    select: { id: true, title: true, fileName: true, size: true, pages: true, level: true, createdAt: true },
+    select: {
+      id: true, title: true, fileName: true, size: true, pages: true, level: true, createdAt: true,
+      tags: true, field: true, method: true, year: true,
+    },
   });
 
   return NextResponse.json({ papers, max: MAX_PAPERS });
@@ -68,7 +71,10 @@ export async function POST(req) {
       pages,
       level,
     },
-    select: { id: true, title: true, fileName: true, size: true, pages: true, level: true, createdAt: true },
+    select: {
+      id: true, title: true, fileName: true, size: true, pages: true, level: true, createdAt: true,
+      tags: true, field: true, method: true, year: true,
+    },
   });
 
   return NextResponse.json({ paper }, { status: 201 });

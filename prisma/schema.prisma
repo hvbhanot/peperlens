@@ -1,5 +1,5 @@
 // PaperLens database schema
-// Postgres on Railway. Run `prisma migrate deploy` on start (see package.json).
+// Postgres on Railway. Run `prisma db push` on start (see package.json).
 
 generator client {
   provider = "prisma-client-js"
@@ -35,7 +35,73 @@ model Paper {
   size      Int
   pages     Int      @default(0)
   level     String?
+  // AI-generated structured metadata (cached).
+  tags      String[] @default([])
+  field     String?
+  method    String?
+  year      Int?
+  // Pre-extracted text so we can re-query without re-parsing the PDF.
+  textCache String?
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  analyses  Analysis[]
+  notes     Note[]
+  chatLogs  ChatLog[]
+  flashcards Flashcard[]
 
   @@index([userId])
+}
+
+model Analysis {
+  id        String   @id @default(cuid())
+  paperId   String
+  paper     Paper    @relation(fields: [paperId], references: [id], onDelete: Cascade)
+  which     String
+  // For "summary_mode" the sub-mode lives in opts.
+  opts      String?
+  content   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([paperId, which, opts])
+  @@index([paperId])
+}
+
+model Note {
+  id        String   @id @default(cuid())
+  paperId   String
+  paper     Paper    @relation(fields: [paperId], references: [id], onDelete: Cascade)
+  body      String
+  // Optional page number the note was anchored to.
+  page      Int?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([paperId])
+}
+
+model ChatLog {
+  id        String   @id @default(cuid())
+  paperId   String
+  paper     Paper    @relation(fields: [paperId], references: [id], onDelete: Cascade)
+  role      String
+  content   String
+  createdAt DateTime @default(now())
+
+  @@index([paperId, createdAt])
+}
+
+model Flashcard {
+  id        String   @id @default(cuid())
+  paperId   String
+  paper     Paper    @relation(fields: [paperId], references: [id], onDelete: Cascade)
+  question  String
+  answer    String
+  // 0..1 for spaced-repetition (SRS) scheduling. 0 = unseen, 1 = mastered.
+  mastery   Float    @default(0)
+  lastSeen  DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([paperId])
 }
